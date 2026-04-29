@@ -1,0 +1,80 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "schedule:weekdays",
+    "group:allNonMajor"
+  ],
+  "platform": "gitlab",
+  "endpoint": "https://git.developerdojo.org/api/v4/",
+  "repositories": ["DroidOpsInc/jcode"],
+  "gitAuthor": "DroidOps Renovate <renovate@droidopsinc.dev>",
+  "platformAutomerge": false,
+  "automerge": false,
+  "labels": ["renovate", "droidops"],
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 12,
+  "branchPrefix": "renovate/",
+  "rebaseWhen": "behind-base-branch",
+  "ignorePaths": [
+    "**/node_modules/**",
+    "target/**",
+    "vendor/**"
+  ],
+  "packageRules": [
+    {
+      "description": "Group all Cargo crate updates together — chatty otherwise.",
+      "matchManagers": ["cargo"],
+      "groupName": "cargo crates",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Pin Docker image tags via digest for supply-chain integrity.",
+      "matchDatasources": ["docker"],
+      "pinDigests": true
+    },
+    {
+      "description": "Auto-merge dev-tooling patch bumps after CI passes.",
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true,
+      "platformAutomerge": true
+    },
+    {
+      "description": "Hold off on jcode major-version moves; require human review.",
+      "matchPackageNames": ["jcode"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ],
+  "customDatasources": {
+    "jcode-upstream": {
+      "description": "Tracks the SHA of upstream/master at github.com/1jehuang/jcode. Used by the upstream-tracker custom manager below to surface advances on the dependency dashboard. Actual fast-forward + feature-branch rebase happens in scripts/sync-feature-branches.sh, invoked by the .gitlab-ci.yml upstream-sync job.",
+      "defaultRegistryUrlTemplate": "https://api.github.com/repos/1jehuang/jcode/commits/master",
+      "format": "json",
+      "transformTemplates": [
+        "{\"releases\":[{\"version\":$.sha,\"releaseTimestamp\":$.commit.author.date,\"sourceUrl\":$.html_url}]}"
+      ]
+    }
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Surface a dashboard entry whenever upstream/master advances. Format: a single sentinel line in DROIDOPS.md that pins the upstream SHA we're synced to.",
+      "fileMatch": ["^DROIDOPS\\.md$"],
+      "matchStrings": [
+        "<!-- renovate:upstream-sha -->\\s*`(?<currentValue>[a-f0-9]{7,40})`"
+      ],
+      "datasourceTemplate": "custom.jcode-upstream",
+      "depNameTemplate": "1jehuang/jcode",
+      "versioningTemplate": "loose"
+    }
+  ],
+  "regexManagers": [],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security", "p1"]
+  }
+}

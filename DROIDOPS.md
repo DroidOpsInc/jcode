@@ -47,8 +47,62 @@ To enable the schedule:
 2. Store it as the masked CI variable `UPSTREAM_SYNC_TOKEN`.
 3. Create a daily pipeline schedule with variable `UPSTREAM_SYNC=true`.
 
-Renovate-style auto-rebase of long-lived feature branches against the new
-`master` tip is a follow-up — see the `chore/renovate-config` issue.
+### Renovate-driven feature-branch rebase
+
+After `master` advances, the same `upstream-sync` CI job invokes
+`scripts/sync-feature-branches.sh` to rebase every open `feature/*` and
+`pr/*` branch onto the new tip. See `renovate.json` for the supporting
+custom-datasource that surfaces upstream advances on the Renovate
+dashboard, and `scripts/sync-feature-branches.sh` for the rebase logic
+(Renovate's GitLab plugin doesn't natively support "rebase every open
+branch when the base advances", so we implement that pass ourselves).
+
+Pinned upstream tip (Renovate-tracked):
+
+<!-- renovate:upstream-sha -->
+`6cc66ed2f856d24c771a82b1b39646772b081c96`
+
+The sentinel above is updated by Renovate when upstream/master advances;
+the actual fast-forward + rebase pass happens in CI.
+
+### Conflict-resolution playbook
+
+When `sync-feature-branches.sh` can't rebase a branch cleanly it leaves
+the branch untouched, comments on the open MR with the conflicting
+paths, and labels the MR `needs-rebase`. To resolve:
+
+1. **Pull the latest `master`.**
+   ```bash
+   git fetch origin
+   git checkout master && git pull --ff-only
+   ```
+2. **Check out the feature branch.**
+   ```bash
+   git checkout feature/<topic>
+   git pull --ff-only origin feature/<topic>
+   ```
+3. **Rebase manually.**
+   ```bash
+   git rebase origin/master
+   ```
+4. **Resolve each conflict.** Prefer keeping the upstream-shaped change
+   when the conflict is in vendored code (we want to stay
+   fast-forwardable from `1jehuang/jcode:master`); prefer keeping our
+   change when the conflict is in `DROIDOPS.md`, `.gitlab-ci.yml`, or
+   anything under `scripts/sync-feature-branches.sh`.
+5. **Continue & push.**
+   ```bash
+   git add -A && git rebase --continue
+   git push --force-with-lease origin feature/<topic>
+   ```
+6. **Remove the `needs-rebase` label** from the MR. The next
+   `upstream-sync` pass will leave the branch alone (its tip already
+   contains `master`).
+
+If a branch has been stale for more than 14 days and continues to
+conflict every cycle, close the MR and re-cut the branch from the
+current `master`. Long-lived divergence is what Renovate is trying to
+prevent — a permanent fork is a stronger signal than any one rebase.
 
 ## Why we forked
 
