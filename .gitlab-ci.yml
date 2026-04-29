@@ -118,14 +118,22 @@ clippy:
     - .preflight:lint
     - .rust-preflight
   variables:
-    PREFLIGHT_COMMANDS: "rustup component add clippy && cargo clippy --workspace --all-targets --locked -- -D warnings"
+    # Mirror upstream's invocation exactly:
+    #   .github/workflows/ci.yml -> cargo clippy --all-targets --all-features -- -D warnings
+    # Upstream wires --all-features (not --workspace) deliberately: the
+    # jcode-desktop / jcode-mobile-sim crates are workspace members but
+    # carry their own lint floor that's tracked separately. Matching the
+    # upstream invocation keeps our preflight gated on exactly the same
+    # lints upstream is gated on (DroidOpsInc/jcode#2 acceptance).
+    PREFLIGHT_COMMANDS: "rustup component add clippy && cargo clippy --all-targets --all-features --locked -- -D warnings"
 
 test:
   extends:
     - .preflight:test
     - .rust-preflight
   variables:
-    TEST_COMMANDS: "cargo test --workspace --locked"
+    # Mirror upstream's --all-features posture for parity.
+    TEST_COMMANDS: "cargo test --all-features --locked"
 
 # --- build matrix: 4 targets via cargo-zigbuild ---
 #
