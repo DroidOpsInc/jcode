@@ -95,6 +95,11 @@ variables:
     # blow runner memory at default `nproc` parallelism on the shared
     # gitlab-runners pool. 2 jobs is the empirical sweet spot.
     CARGO_BUILD_JOBS: "2"
+  # Cache only the cargo registry/git db. We deliberately do NOT cache
+  # `target/` because the workspace produces a >5 GB target tree which
+  # OOMKills the runner on cache eviction (137 in the cleanup section).
+  # Compile-time wins are taken via the registry cache; recompiles are
+  # the cost of safety.
   cache:
     key:
       files:
@@ -103,8 +108,11 @@ variables:
       - .cargo-home/registry/index/
       - .cargo-home/registry/cache/
       - .cargo-home/git/db/
-      - target/
     policy: pull-push
+  after_script:
+    # Free the bulk of the on-disk footprint before cache eviction runs.
+    # The runner OOMKills on cleanup when target/ is in the >5 GB range.
+    - rm -rf target/ || true
 
 fmt:
   extends:
@@ -147,6 +155,7 @@ test:
   variables:
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
     JCODE_RELEASE_BUILD: "1"
+    CARGO_BUILD_JOBS: "2"
   cache:
     key:
       prefix: "build-${TARGET}"
@@ -156,8 +165,10 @@ test:
       - .cargo-home/registry/index/
       - .cargo-home/registry/cache/
       - .cargo-home/git/db/
-      - target/${TARGET}/release/
     policy: pull-push
+  after_script:
+    # Free the bulk of the on-disk footprint before cache eviction runs.
+    - rm -rf target/ || true
   before_script:
     - rustup target add "${TARGET}"
   script:
