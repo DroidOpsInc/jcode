@@ -585,7 +585,9 @@ impl SimulatorStore {
                 };
                 self.effect_log.push(effect_record.clone());
                 effect_records.push(effect_record);
-                let follow_ups = FakeJcodeBackend::default().handle_effect(effect);
+                // FakeJcodeBackend is a unit struct; construct directly
+                // (clippy::default_constructed_unit_structs).
+                let follow_ups = FakeJcodeBackend.handle_effect(effect);
                 for next in follow_ups.into_iter().rev() {
                     pending.push(next);
                 }

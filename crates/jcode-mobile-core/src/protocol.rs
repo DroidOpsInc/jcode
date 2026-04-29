@@ -192,16 +192,19 @@ pub fn serialize_mobile_request(
     })
 }
 
+// `Known` is ~272 bytes vs `Unknown` at ~56 bytes. We Box the larger
+// variant to keep the enum size reasonable and silence
+// clippy::large_enum_variant. See DroidOpsInc/jcode#2.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DecodedMobileServerEvent {
-    Known(MobileServerEvent),
+    Known(Box<MobileServerEvent>),
     Unknown(RawMobileServerEvent),
 }
 
 pub fn decode_mobile_server_event_lossy(value: Value) -> anyhow::Result<DecodedMobileServerEvent> {
     match serde_json::from_value::<MobileServerEvent>(value.clone()) {
-        Ok(event) => Ok(DecodedMobileServerEvent::Known(event)),
+        Ok(event) => Ok(DecodedMobileServerEvent::Known(Box::new(event))),
         Err(_) => {
             let event_type = value
                 .get("type")
