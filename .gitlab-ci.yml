@@ -79,16 +79,16 @@ variables:
 
 .rust-preflight:
   variables:
-    # Rust 1.90 — the floor implied by the locked dependency graph
-    # (quantette@0.5.1 requires rustc 1.90; safe_arch / wide require
-    # 1.89). Edition 2024 (declared in the workspace Cargo.toml)
-    # stabilised at 1.85, so 1.90 satisfies both. Pinned at the
-    # minimum compatible toolchain so each new stable release is an
-    # explicit decision: clippy lints ratchet between minor versions,
-    # and we'd rather adopt them in a dedicated MR than have CI break
-    # opportunistically.
+    # Rust 1.91 — the floor implied by:
+    #   - workspace declares edition = "2024"   (stable since 1.85)
+    #   - dep graph: quantette@0.5.1 needs 1.90, safe_arch/wide 1.89
+    #   - src/tool/mod.rs uses `str::floor_char_boundary`
+    #     (stable since 1.91, was unstable round_char_boundary)
+    # We pin at the floor so each stable bump is an explicit decision —
+    # clippy lints ratchet between minor versions and we'd rather adopt
+    # them in a dedicated MR than have CI break opportunistically.
     # renovate: datasource=docker depName=rust
-    PREFLIGHT_IMAGE: "${IMAGE_REGISTRY}/dockerhub-proxy/library/rust:1.90-bookworm"
+    PREFLIGHT_IMAGE: "${IMAGE_REGISTRY}/dockerhub-proxy/library/rust:1.91-bookworm"
     PREFLIGHT_REQUIRED_TOOLS: "cargo rustc"
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
     # Cap parallelism — the workspace pulls in wgpu / winit / ash which
