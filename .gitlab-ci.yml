@@ -8,6 +8,8 @@
 #   - preflight     — cargo fmt + cargo clippy + cargo test (workspace)
 #   - build         — cross-compile release binaries for 4 targets via
 #                     cargo-zigbuild on a single Linux runner
+#   - package       — windows-only zip step (alpine/k8s, python stdlib);
+#                     linux/macos targets tar.gz inside `build`
 #   - sbom          — Syft CycloneDX + SPDX SBOM over the cargo workspace
 #   - sign          — Notation/AKV detached signature over each binary +
 #                     SBOM artifact bundle
@@ -40,6 +42,7 @@ stages:
   - upstream-sync
   - preflight
   - build
+  - package
   - sbom
   - sign
   - publish
@@ -189,9 +192,6 @@ test:
     - rm -rf target/ || true
   before_script:
     - rustup target add "${TARGET}"
-    # cargo-zigbuild image is debian-slim and doesn't ship `zip`; install
-    # it lazily for the windows packaging step. Idempotent.
-    - command -v zip >/dev/null 2>&1 || (apt-get update -qq && apt-get install -qq -y zip)
   script:
     - echo "=== cargo-zigbuild --target ${TARGET} ==="
     - export JCODE_BUILD_SEMVER="${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
@@ -199,16 +199,21 @@ test:
     - mkdir -p dist
     - |
       if [ "${TARGET}" = "x86_64-pc-windows-gnu" ]; then
+        # Windows: emit the raw .exe only. Zipping happens in
+        # package:windows-x86_64 because the cargo-zigbuild image
+        # (debian-slim, runs non-root under Kyverno) cannot apt-get
+        # install `zip` at job time. See package:windows-x86_64 below.
         cp "target/${TARGET}/release/${BIN_NAME}.exe" "dist/${ARTIFACT}.exe"
-        (cd dist && zip -9 "${ARTIFACT}.zip" "${ARTIFACT}.exe")
-        rm "dist/${ARTIFACT}.exe"
+        (cd dist && sha256sum "${ARTIFACT}.exe" > "${ARTIFACT}.exe.sha256")
       else
+        # Linux/macOS: tar.gz packaging stays in-place — the
+        # cargo-zigbuild image ships tar in its busybox base.
         cp "target/${TARGET}/release/${BIN_NAME}" "dist/${ARTIFACT}"
         chmod +x "dist/${ARTIFACT}"
         (cd dist && tar czf "${ARTIFACT}.tar.gz" "${ARTIFACT}")
         rm "dist/${ARTIFACT}"
+        (cd dist && sha256sum "${ARTIFACT}.tar.gz" > "${ARTIFACT}.sha256")
       fi
-    - (cd dist && sha256sum * > "${ARTIFACT}.sha256")
     - ls -la dist/
   artifacts:
     name: "${ARTIFACT}"
@@ -251,6 +256,47 @@ build:windows-x86_64:
     BIN_NAME: "jcode"
     ARTIFACT: "jcode-windows-x86_64"
 
+# --- package:windows-x86_64 ---
+#
+# Zips the windows .exe produced by build:windows-x86_64 into
+# `dist/jcode-windows-x86_64.zip`. Runs in alpine/k8s (the canonical
+# launch-sequence non-root preflight image) and uses Python's stdlib
+# `zipfile` module so no apt/apk install is needed at job time.
+#
+# Background: the build job runs in messense/cargo-zigbuild (debian-slim)
+# which doesn't ship `zip` and is forbidden by Kyverno from running as
+# root in the runner pod, so apt-get fails with EACCES. Splitting
+# build/package keeps the build image declarative and the package step
+# trivial.
+
+package:windows-x86_64:
+  stage: package
+  image: "${IMAGE_REGISTRY}/dockerhub-proxy/alpine/k8s:1.33.1"
+  needs:
+    - job: build:windows-x86_64
+      artifacts: true
+  variables:
+    ARTIFACT: "jcode-windows-x86_64"
+  script:
+    - 'echo "=== package windows: python3 -m zipfile ${ARTIFACT}.zip ==="'
+    - 'test -f "dist/${ARTIFACT}.exe"'
+    - 'cd dist'
+    - 'python3 -m zipfile -c "${ARTIFACT}.zip" "${ARTIFACT}.exe"'
+    - 'rm "${ARTIFACT}.exe" "${ARTIFACT}.exe.sha256"'
+    - 'sha256sum "${ARTIFACT}.zip" > "${ARTIFACT}.sha256"'
+    - 'ls -la'
+  artifacts:
+    name: "${ARTIFACT}"
+    paths:
+      - dist/${ARTIFACT}.zip
+      - dist/${ARTIFACT}.sha256
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: '$CI_COMMIT_TAG =~ /^v.*-droidops/'
+    - if: '$CI_COMMIT_TAG =~ /^v.*-dops/'
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
 # --- SBOM (Syft, CycloneDX + SPDX) ---
 
 sbom:
@@ -260,7 +306,7 @@ sbom:
     - build:linux-x86_64
     - build:linux-aarch64
     - build:macos-aarch64
-    - build:windows-x86_64
+    - package:windows-x86_64
   script:
     - echo "=== Syft SBOM (CycloneDX + SPDX JSON) over cargo workspace ==="
     - mkdir -p dist
@@ -294,7 +340,7 @@ sign:
       artifacts: true
     - job: build:macos-aarch64
       artifacts: true
-    - job: build:windows-x86_64
+    - job: package:windows-x86_64
       artifacts: true
     - job: sbom
       artifacts: true
@@ -343,7 +389,7 @@ publish:
       artifacts: true
     - job: build:macos-aarch64
       artifacts: true
-    - job: build:windows-x86_64
+    - job: package:windows-x86_64
       artifacts: true
     - job: sbom
       artifacts: true
@@ -426,7 +472,7 @@ policy:release:
     - job: build:linux-x86_64
     - job: build:linux-aarch64
     - job: build:macos-aarch64
-    - job: build:windows-x86_64
+    - job: package:windows-x86_64
     - job: sbom
     - job: sign
   before_script:
@@ -469,7 +515,7 @@ attest:
       artifacts: true
     - job: build:macos-aarch64
       artifacts: true
-    - job: build:windows-x86_64
+    - job: package:windows-x86_64
       artifacts: true
     - job: sbom
       artifacts: true
@@ -540,7 +586,7 @@ release:
       artifacts: true
     - job: build:macos-aarch64
       artifacts: true
-    - job: build:windows-x86_64
+    - job: package:windows-x86_64
       artifacts: true
     - job: sbom
       artifacts: true
