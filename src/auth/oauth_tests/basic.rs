@@ -1,3 +1,13 @@
+// These tests assert non-emptiness of compile-time `const &str` OAuth
+// scope/client-id constants. clippy 1.91 added `const_is_empty`, which
+// (correctly) points out that calling `.is_empty()` on a known-non-empty
+// const is always false at compile time. The intent of these checks is
+// exactly that compile-time guarantee — they fail compilation if somebody
+// edits a constant to the empty string. Allowlist scoped to this test
+// module only — see DroidOpsInc/jcode#2 for context, and consider
+// migrating to `const_assert!` upstream.
+#![allow(clippy::const_is_empty)]
+
 use super::*;
 use anyhow::{Result, anyhow};
 
