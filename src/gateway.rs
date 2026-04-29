@@ -275,7 +275,14 @@ pub struct GatewayClient {
 }
 
 /// Handle a single incoming TCP connection: upgrade to WebSocket, auth, bridge.
-#[expect(
+//
+// `#[allow]` (not `#[expect]`) because the large-err clippy lint is conditional —
+// it fires when the wrapping `Result` type's `Err` exceeds the configured size
+// budget, which depends on Tungstenite's `ErrorResponse` layout in the active
+// rustc/clippy combo. `#[expect]` would loudly fail on toolchain bumps where
+// the lint stops triggering (DroidOpsInc/jcode#2 — pre-existing upstream issue,
+// patched in our fork to keep `-D warnings` clean without silencing globally).
+#[allow(
     clippy::result_large_err,
     reason = "WebSocket handshake callback must return Tungstenite ErrorResponse directly"
 )]
