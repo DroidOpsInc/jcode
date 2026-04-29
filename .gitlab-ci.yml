@@ -93,8 +93,16 @@ variables:
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
     # Cap parallelism — the workspace pulls in wgpu / winit / ash which
     # blow runner memory at default `nproc` parallelism on the shared
-    # gitlab-runners pool. 2 jobs is the empirical sweet spot.
-    CARGO_BUILD_JOBS: "2"
+    # mr-validator pool. 1 job is the empirical floor; 2 still OOM-kills.
+    CARGO_BUILD_JOBS: "1"
+    # Strip debug info from dev / test profiles. cargo check/clippy
+    # still emits debuginfo by default which dominates peak memory in
+    # the rustc process tree.
+    CARGO_PROFILE_DEV_DEBUG: "0"
+    CARGO_PROFILE_TEST_DEBUG: "0"
+    # Single-threaded codegen -- denies LLVM the per-CGU worker memory
+    # baseline that pushes us past the runner cap.
+    CARGO_PROFILE_DEV_CODEGEN_UNITS: "1"
   # Cache only the cargo registry/git db. We deliberately do NOT cache
   # `target/` because the workspace produces a >5 GB target tree which
   # OOMKills the runner on cache eviction (137 in the cleanup section).
