@@ -1,5 +1,11 @@
 # jcode Telemetry
 
+> **DroidOpsInc fork note (April 2026):** Telemetry is **OFF by default** in this
+> build. No events are sent unless an endpoint is explicitly configured via
+> `JCODE_TELEMETRY_ENDPOINT` env var or `endpoint = "..."` in
+> `${JCODE_HOME:-~/.jcode}/telemetry.toml`. The schema below describes what
+> *would* be sent if you opt in; nothing here phones home automatically.
+
 jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development without collecting prompts or code.
 
 Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, and privacy-safe per-turn timing/outcome metrics.
