@@ -39,6 +39,16 @@ name = "jcode-harness"
 path = "src/bin/harness.rs"
 
 [dependencies]
+# Force vendored OpenSSL across the workspace so cross-compilation
+# (linux-aarch64, macos-aarch64, windows-x86_64) doesn't depend on the
+# host's libssl-dev. native-tls (pulled in transitively via
+# `reqwest`'s default features and `imap`) requires `openssl-sys`,
+# which needs the headers from the target sysroot we don't ship.
+# Activating the `vendored` feature on `openssl-sys` makes Cargo
+# build OpenSSL from source as part of the build, with no runtime
+# OS dependency. See DroidOpsInc/jcode#2.
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
 # Memory allocator (reduces fragmentation for long-running server)
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
