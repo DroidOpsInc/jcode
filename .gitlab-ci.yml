@@ -55,9 +55,10 @@ variables:
   UPSTREAM_URL: "https://github.com/1jehuang/jcode.git"
   UPSTREAM_BRANCH: "master"
   # cargo-zigbuild image — handles all four cross-compile targets from
-  # a single Linux runner. Pinned for reproducibility.
-  # renovate: datasource=docker depName=ghcr.io/rust-cross/cargo-zigbuild
-  RUST_BUILD_IMAGE: "ghcr.io/rust-cross/cargo-zigbuild:0.20.0"
+  # a single Linux runner. Pinned for reproducibility. Pulled through the
+  # Harbor dockerhub-proxy.
+  # renovate: datasource=docker depName=messense/cargo-zigbuild
+  RUST_BUILD_IMAGE: "${IMAGE_REGISTRY}/dockerhub-proxy/messense/cargo-zigbuild:0.22.3"
   # renovate: datasource=docker depName=anchore/syft
   SYFT_IMAGE: "${IMAGE_REGISTRY}/dockerhub-proxy/anchore/syft:v1.18.1"
   # renovate: datasource=docker depName=aquasec/trivy
@@ -78,8 +79,9 @@ variables:
 
 .rust-preflight:
   variables:
+    # Rust 1.85+ required (workspace declares edition = "2024").
     # renovate: datasource=docker depName=rust
-    PREFLIGHT_IMAGE: "${IMAGE_REGISTRY}/dockerhub-proxy/library/rust:1.83-bookworm"
+    PREFLIGHT_IMAGE: "${IMAGE_REGISTRY}/dockerhub-proxy/library/rust:1.95-bookworm"
     PREFLIGHT_REQUIRED_TOOLS: "cargo rustc"
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
   cache:
