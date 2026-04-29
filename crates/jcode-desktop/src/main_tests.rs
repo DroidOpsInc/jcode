@@ -1,3 +1,13 @@
+// These tests assert relationships between compile-time `const` font-size
+// constants. clippy 1.91 introduced `assertions-on-constants`, which flags
+// every `assert!(<all-const-expression>)` as "will be optimized out by the
+// compiler". The intent here is to fail compilation when the constants are
+// edited inconsistently (e.g. somebody sets the title size below the body
+// size). Const-only assertions are exactly the right tool. Allowlist scoped
+// to this test module only — see DroidOpsInc/jcode#2 for context, and
+// consider migrating to `static_assertions::const_assert!` upstream.
+#![allow(clippy::assertions_on_constants)]
+
 use super::animation::{FOCUS_PULSE_DURATION, VIEWPORT_ANIMATION_DURATION};
 use super::single_session::*;
 use super::*;
