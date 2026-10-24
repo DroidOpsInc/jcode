@@ -22,8 +22,6 @@ upstream-sync:
   image: alpine/git:latest
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $UPSTREAM_SYNC == "true"'
-  before_script:
-    - apk add --no-cache curl
   script:
     - git config user.email "ci@droidopsinc.dev"
     - git config user.name "DroidOps CI (jcode upstream sync)"
