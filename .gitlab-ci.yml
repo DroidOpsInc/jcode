@@ -14,15 +14,24 @@ variables:
   UPSTREAM_URL: "https://github.com/1jehuang/jcode.git"
   UPSTREAM_BRANCH: "master"
 
-# Daily fast-forward of master from upstream.
+# Daily merge of upstream into master. The fork carries local commits (CI, DROIDOPS.md),
+# so a fast-forward is impossible; history is merged, never rewritten or rebased.
+# On a merge conflict the job aborts the merge, opens (or reuses) an issue and fails.
 # Schedule with: variable UPSTREAM_SYNC=true and a daily cadence.
-# Requires CI variable UPSTREAM_SYNC_TOKEN (project access token, write_repository scope).
+# Requires CI variable UPSTREAM_SYNC_TOKEN (project access token, write_repository scope;
+# add api scope so the conflict issue can be opened).
 upstream-sync:
   stage: upstream-sync
   image: alpine/git:latest
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $UPSTREAM_SYNC == "true"'
   script:
+    - |
+      if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
+        echo "ERROR: UPSTREAM_SYNC_TOKEN is not set."
+        echo "Create a project access token with write_repository scope and store it as a masked CI variable."
+        exit 1
+      fi
     - git config user.email "ci@droidopsinc.dev"
     - git config user.name "DroidOps CI (jcode upstream sync)"
     - git remote add upstream "${UPSTREAM_URL}" || git remote set-url upstream "${UPSTREAM_URL}"
@@ -30,15 +39,19 @@ upstream-sync:
     - git fetch upstream --tags
     - git checkout -B "${UPSTREAM_BRANCH}" "refs/remotes/origin/${UPSTREAM_BRANCH}"
     - |
-      if ! git merge --ff-only "upstream/${UPSTREAM_BRANCH}"; then
-        echo "ERROR: master has diverged from upstream/${UPSTREAM_BRANCH}."
-        echo "Manual reconciliation required."
-        exit 1
-      fi
-    - |
-      if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
-        echo "ERROR: UPSTREAM_SYNC_TOKEN is not set."
-        echo "Create a project access token with write_repository scope and store it as a masked CI variable."
+      if ! git merge --no-edit "upstream/${UPSTREAM_BRANCH}"; then
+        git merge --abort || true
+        TITLE="upstream-sync: merge conflict with upstream/${UPSTREAM_BRANCH}"
+        API="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues"
+        EXISTING="$(wget -q -O - --header "PRIVATE-TOKEN: ${UPSTREAM_SYNC_TOKEN}" "${API}?state=opened&search=upstream-sync%3A+merge+conflict" || true)"
+        if echo "$EXISTING" | grep -q "merge conflict with upstream"; then
+          echo "An open conflict issue already exists."
+        else
+          wget -q -O /dev/null --header "PRIVATE-TOKEN: ${UPSTREAM_SYNC_TOKEN}" \
+            --post-data "title=${TITLE}&description=Scheduled sync pipeline ${CI_PIPELINE_URL} could not merge upstream/${UPSTREAM_BRANCH} into ${CI_COMMIT_BRANCH:-$UPSTREAM_BRANCH}. Resolve the conflict by merging upstream locally and pushing." \
+            "${API}" || echo "WARNING: could not open the conflict issue (token needs api scope)."
+        fi
+        echo "ERROR: merge conflict with upstream/${UPSTREAM_BRANCH}. Manual resolution required."
         exit 1
       fi
     - |
