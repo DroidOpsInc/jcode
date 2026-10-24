@@ -28,7 +28,7 @@ upstream-sync:
     - git remote add upstream "${UPSTREAM_URL}" || git remote set-url upstream "${UPSTREAM_URL}"
     - git fetch upstream "${UPSTREAM_BRANCH}"
     - git fetch upstream --tags
-    - git checkout "${UPSTREAM_BRANCH}"
+    - git checkout -B "${UPSTREAM_BRANCH}" "refs/remotes/origin/${UPSTREAM_BRANCH}"
     - |
       if ! git merge --ff-only "upstream/${UPSTREAM_BRANCH}"; then
         echo "ERROR: master has diverged from upstream/${UPSTREAM_BRANCH}."
