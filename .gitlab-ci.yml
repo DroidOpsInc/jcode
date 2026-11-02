@@ -2,8 +2,8 @@
 #
 # Vendored fork of github.com/1jehuang/jcode (MIT). See DROIDOPS.md.
 #
-# v0 scope: upstream-sync only.
-#   Build/test/release uses upstream's existing GitHub Actions for now.
+# Scope: upstream-sync, upstream-merge-check, and a Rust compile+test gate (rust-check).
+#   Release still uses upstream's GitHub Actions.
 #   Launch-sequence integration is a follow-up — see DroidOpsInc/hypercraft
 #   epic for the harness-engine adapter milestone.
 
@@ -14,6 +14,7 @@ stages:
 variables:
   UPSTREAM_URL: "https://github.com/1jehuang/jcode.git"
   UPSTREAM_BRANCH: "master"
+  IMAGE_REGISTRY: "harbor.focuscell.org"
 
 # Daily merge of upstream into master. The fork carries local commits (CI, DROIDOPS.md),
 # so a fast-forward is impossible; history is merged, never rewritten or rebased.
@@ -89,4 +90,38 @@ upstream-merge-check:
         echo "Resolve by merging upstream into the default branch (see upstream-sync)."
         exit 1
       fi
+  interruptible: true
+
+# Compile + test gate for the fork's Rust (including the opt-in telemetry port in
+# crates/jcode-telemetry-core). Runs on master pushes and MRs, never on the
+# scheduled upstream-sync pipeline. CI builds are the only place this is compiled.
+rust-check:
+  stage: check
+  image: ${IMAGE_REGISTRY}/dockerhub-proxy/library/rust:1-bookworm
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  variables:
+    JCODE_CI: "1"
+    CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
+    CARGO_TARGET_DIR: "${CI_PROJECT_DIR}/target"
+    # Disable the local -Zthreads rustc wrapper from .cargo/config.toml.
+    CARGO_BUILD_RUSTC_WRAPPER: ""
+    CARGO_INCREMENTAL: "0"
+    CARGO_TERM_COLOR: never
+  cache:
+    key:
+      files: [Cargo.lock]
+      prefix: rust-check
+    paths:
+      - .cargo-home/registry/
+      - .cargo-home/git/
+      - target/
+  timeout: 1h
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake clang libclang-dev pkg-config libssl-dev protobuf-compiler >/dev/null
+    - rustc --version && cargo --version
+  script:
+    - cargo check --locked --workspace
+    - cargo test --locked -p jcode-telemetry-core -p jcode-app-core
   interruptible: true
