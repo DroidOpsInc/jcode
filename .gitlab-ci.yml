@@ -126,7 +126,7 @@ rust-check:
   script:
     - df -h . | tail -1
     - cargo check --locked --workspace
-    - rm -rf target/debug/incremental
+    - rm -rf target
     - df -h . | tail -1
     - cargo test --locked -p jcode-telemetry-core -p jcode-app-core
   interruptible: true
