@@ -112,6 +112,10 @@ rust-check:
     # Runner disk is small: no debuginfo, and the cache keeps only the registry.
     CARGO_PROFILE_DEV_DEBUG: "0"
     CARGO_PROFILE_TEST_DEBUG: "0"
+    CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+    CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+    KUBERNETES_EPHEMERAL_STORAGE_REQUEST: "30Gi"
+    KUBERNETES_EPHEMERAL_STORAGE_LIMIT: "40Gi"
   cache:
     key:
       files: [Cargo.lock]
@@ -126,7 +130,41 @@ rust-check:
   script:
     - df -h . | tail -1
     - cargo check --locked --workspace
-    - rm -rf target
+  interruptible: true
+
+rust-test:
+  stage: check
+  image: ${IMAGE_REGISTRY}/dockerhub-proxy/library/rust:1-bookworm
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  variables:
+    JCODE_CI: "1"
+    CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
+    CARGO_TARGET_DIR: "${CI_PROJECT_DIR}/target"
+    # Disable the local -Zthreads rustc wrapper from .cargo/config.toml.
+    CARGO_BUILD_RUSTC_WRAPPER: ""
+    CARGO_INCREMENTAL: "0"
+    CARGO_TERM_COLOR: never
+    # Runner disk is small: no debuginfo, and the cache keeps only the registry.
+    CARGO_PROFILE_DEV_DEBUG: "0"
+    CARGO_PROFILE_TEST_DEBUG: "0"
+    CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+    CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+    KUBERNETES_EPHEMERAL_STORAGE_REQUEST: "30Gi"
+    KUBERNETES_EPHEMERAL_STORAGE_LIMIT: "40Gi"
+  cache:
+    key:
+      files: [Cargo.lock]
+      prefix: rust-test
+    paths:
+      - .cargo-home/registry/
+      - .cargo-home/git/
+  timeout: 1h
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake clang libclang-dev pkg-config libssl-dev protobuf-compiler >/dev/null
+    - rustc --version && cargo --version
+  script:
     - df -h . | tail -1
     - cargo test --locked -p jcode-telemetry-core -p jcode-app-core
   interruptible: true
