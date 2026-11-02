@@ -1,5 +1,12 @@
 use super::*;
+// These moved from cli::provider_init to crate::external_auth in the
+// tui->cli layering refactor (a9a82827); provider_init.rs only re-imports the
+// subset it uses, so `super::*` no longer re-exports them to this test module.
+use crate::external_auth::{
+    parse_external_auth_review_selection, pending_external_auth_review_candidates,
+};
 use crate::provider_catalog::{self, resolve_login_selection, resolve_openai_compatible_profile};
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
@@ -14,15 +21,15 @@ fn lock_env() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Jcode.as_arg_value(), "jcode");
     assert_eq!(ProviderChoice::Claude.as_arg_value(), "claude");
-    assert_eq!(
-        ProviderChoice::ClaudeSubprocess.as_arg_value(),
-        "claude-subprocess"
-    );
+    assert_eq!(ProviderChoice::AnthropicApi.as_arg_value(), "anthropic-api");
     assert_eq!(ProviderChoice::Openai.as_arg_value(), "openai");
+    assert_eq!(ProviderChoice::OpenaiApi.as_arg_value(), "openai-api");
     assert_eq!(ProviderChoice::Openrouter.as_arg_value(), "openrouter");
+    assert_eq!(ProviderChoice::Bedrock.as_arg_value(), "bedrock");
     assert_eq!(ProviderChoice::Azure.as_arg_value(), "azure");
     assert_eq!(ProviderChoice::Opencode.as_arg_value(), "opencode");
     assert_eq!(ProviderChoice::OpencodeGo.as_arg_value(), "opencode-go");
@@ -33,8 +40,17 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::TogetherAi.as_arg_value(), "togetherai");
     assert_eq!(ProviderChoice::Deepinfra.as_arg_value(), "deepinfra");
     assert_eq!(ProviderChoice::Fireworks.as_arg_value(), "fireworks");
+    assert_eq!(ProviderChoice::Novita.as_arg_value(), "novita");
     assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
     assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
+    assert_eq!(ProviderChoice::GrokBuild.as_arg_value(), "grok-build");
+    assert_eq!(ProviderChoice::XiaomiMimo.as_arg_value(), "xiaomi-mimo");
+    assert_eq!(ProviderChoice::MetaMuse.as_arg_value(), "meta-muse");
+    assert_eq!(
+        ProviderChoice::MuseSubscription.as_arg_value(),
+        "muse-subscription"
+    );
+    assert_eq!(ProviderChoice::Celeris.as_arg_value(), "celeris");
     assert_eq!(ProviderChoice::Lmstudio.as_arg_value(), "lmstudio");
     assert_eq!(ProviderChoice::Ollama.as_arg_value(), "ollama");
     assert_eq!(ProviderChoice::Chutes.as_arg_value(), "chutes");
@@ -56,6 +72,164 @@ fn test_provider_choice_arg_values() {
 }
 
 #[test]
+fn novita_cli_aliases_select_the_builtin_profile() {
+    use clap::ValueEnum;
+    for input in ["novita", "novita-ai", "novita.ai"] {
+        let choice = ProviderChoice::from_str(input, false).unwrap();
+        assert_eq!(choice, ProviderChoice::Novita);
+        assert_eq!(
+            profile_for_choice(&choice),
+            Some(provider_catalog::NOVITA_PROFILE)
+        );
+        assert_eq!(
+            login_provider_for_choice(&choice),
+            Some(provider_catalog::NOVITA_LOGIN_PROVIDER)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
+)]
+async fn explicit_anthropic_api_choice_pins_api_key_over_available_oauth() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let keys = [
+        "JCODE_HOME",
+        "ANTHROPIC_API_KEY",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ];
+    let saved: Vec<(&str, Option<String>)> = keys
+        .iter()
+        .map(|key| (*key, std::env::var(key).ok()))
+        .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-api-test");
+    for key in [
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ] {
+        crate::env::remove_var(key);
+    }
+    std::fs::write(
+        dir.path().join("auth.json"),
+        serde_json::json!({
+            "anthropic_accounts": [{
+                "label": "primary",
+                "access": "oauth-access-token",
+                "refresh": "oauth-refresh-token",
+                "expires": chrono::Utc::now().timestamp_millis() + 3_600_000,
+                "scopes": ["user:inference"]
+            }],
+            "active_anthropic_account": "primary"
+        })
+        .to_string(),
+    )
+    .expect("write competing OAuth credentials");
+    crate::config::invalidate_config_cache();
+    crate::auth::AuthStatus::invalidate_cache();
+
+    let provider =
+        init_provider_for_validation(&ProviderChoice::AnthropicApi, Some("claude-haiku-4-5"))
+            .await
+            .expect("explicit Anthropic API provider should initialize");
+
+    assert_eq!(provider.active_auth_method_label(), Some("API key"));
+    assert_eq!(provider.model(), "claude-haiku-4-5");
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref(),
+        Some("claude-api")
+    );
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(key, value);
+        } else {
+            crate::env::remove_var(key);
+        }
+    }
+    crate::config::invalidate_config_cache();
+    crate::auth::AuthStatus::invalidate_cache();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
+)]
+async fn explicit_openai_api_choice_overrides_configured_compatible_default() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let keys = [
+        "JCODE_HOME",
+        "OPENAI_API_KEY",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ];
+    let saved: Vec<(&str, Option<String>)> = keys
+        .iter()
+        .map(|key| (*key, std::env::var(key).ok()))
+        .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("OPENAI_API_KEY", "sk-openai-api-test");
+    for key in keys.iter().skip(2) {
+        crate::env::remove_var(key);
+    }
+    std::fs::write(
+        dir.path().join("config.toml"),
+        r#"
+[provider]
+default_provider = "local-gateway"
+default_model = "gateway-default"
+
+[providers.local-gateway]
+type = "openai-compatible"
+base_url = "http://localhost:1234/v1"
+auth = "none"
+default_model = "gateway-default"
+requires_api_key = false
+"#,
+    )
+    .expect("write competing configured provider default");
+    crate::config::invalidate_config_cache();
+    crate::auth::AuthStatus::invalidate_cache();
+
+    let provider = init_provider_for_validation(&ProviderChoice::OpenaiApi, Some("gpt-5.6-luna"))
+        .await
+        .expect("explicit OpenAI API provider should override configured defaults");
+
+    assert_eq!(provider.active_auth_method_label(), Some("API key"));
+    assert_eq!(provider.model(), "gpt-5.6-luna");
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref(),
+        Some("openai-api")
+    );
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(key, value);
+        } else {
+            crate::env::remove_var(key);
+        }
+    }
+    crate::config::invalidate_config_cache();
+    crate::auth::AuthStatus::invalidate_cache();
+}
+
+#[test]
 fn test_server_bootstrap_login_selection_preserves_order() {
     let providers = provider_catalog::server_bootstrap_login_providers();
     assert_eq!(
@@ -63,24 +237,16 @@ fn test_server_bootstrap_login_selection_preserves_order() {
         Some("claude")
     );
     assert_eq!(
-        resolve_login_selection("3", &providers).map(|provider| provider.id),
-        Some("jcode")
+        resolve_login_selection("2", &providers).map(|provider| provider.id),
+        Some("anthropic-api")
     );
     assert_eq!(
         resolve_login_selection("4", &providers).map(|provider| provider.id),
+        Some("jcode")
+    );
+    assert_eq!(
+        resolve_login_selection("5", &providers).map(|provider| provider.id),
         Some("copilot")
-    );
-    assert_eq!(
-        resolve_login_selection("10", &providers).map(|provider| provider.id),
-        Some("chutes")
-    );
-    assert_eq!(
-        resolve_login_selection("11", &providers).map(|provider| provider.id),
-        Some("cerebras")
-    );
-    assert_eq!(
-        resolve_login_selection("12", &providers).map(|provider| provider.id),
-        Some("alibaba-coding-plan")
     );
 }
 
@@ -92,23 +258,27 @@ fn test_auto_init_login_selection_preserves_order() {
         Some("claude")
     );
     assert_eq!(
-        resolve_login_selection("10", &providers).map(|provider| provider.id),
-        Some("alibaba-coding-plan")
+        resolve_login_selection("2", &providers).map(|provider| provider.id),
+        Some("anthropic-api")
     );
     assert_eq!(
         resolve_login_selection("11", &providers).map(|provider| provider.id),
-        Some("cursor")
+        Some("alibaba-coding-plan")
     );
     assert_eq!(
         resolve_login_selection("12", &providers).map(|provider| provider.id),
-        Some("copilot")
+        Some("cursor")
     );
     assert_eq!(
         resolve_login_selection("13", &providers).map(|provider| provider.id),
-        Some("gemini")
+        Some("copilot")
     );
     assert_eq!(
         resolve_login_selection("14", &providers).map(|provider| provider.id),
+        Some("gemini")
+    );
+    assert_eq!(
+        resolve_login_selection("15", &providers).map(|provider| provider.id),
         Some("antigravity")
     );
 }
@@ -117,17 +287,28 @@ fn test_auto_init_login_selection_preserves_order() {
 fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
     let _guard = lock_env();
     let _env_guard = crate::storage::lock_test_env();
+    // Sandbox JCODE_HOME: with the real home, persisted auth/credential state
+    // (e.g. a pinned anthropic api-key route) re-pins JCODE_RUNTIME_PROVIDER
+    // during MultiProvider construction and breaks the assertions below.
+    let dir = TempDir::new().expect("temp dir");
+    let saved_home = std::env::var("JCODE_HOME").ok();
+    crate::env::set_var("JCODE_HOME", dir.path());
     crate::subscription_catalog::clear_runtime_env();
     crate::env::remove_var("JCODE_OPENROUTER_MODEL");
+    crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
     crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
-    crate::env::remove_var("JCODE_FORCE_PROVIDER");
+    crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let provider = runtime
         .block_on(init_provider(&ProviderChoice::Jcode, None))
         .expect("init jcode provider");
 
-    assert_eq!(provider.name(), "Jcode Subscription");
+    // Display name is Jcode Subscription since b7b5977f8 (subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME).
+    assert_eq!(
+        provider.name(),
+        crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+    );
     assert!(crate::subscription_catalog::is_runtime_mode_enabled());
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
@@ -138,14 +319,25 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
         Some("openrouter")
     );
     assert_eq!(
-        std::env::var("JCODE_FORCE_PROVIDER").ok().as_deref(),
+        std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref(),
+        Some("jcode")
+    );
+    assert_eq!(
+        std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
+            .ok()
+            .as_deref(),
         Some("1")
     );
 
     crate::subscription_catalog::clear_runtime_env();
     crate::env::remove_var("JCODE_OPENROUTER_MODEL");
+    crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
     crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
-    crate::env::remove_var("JCODE_FORCE_PROVIDER");
+    crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+    match saved_home {
+        Some(home) => crate::env::set_var("JCODE_HOME", home),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
 }
 
 #[test]
@@ -247,6 +439,60 @@ fn parse_external_auth_review_selection_supports_all_and_deduped_indices() {
 }
 
 #[test]
+fn parse_login_provider_selection_supports_skip_and_names() {
+    let providers = provider_catalog::cli_login_providers();
+
+    assert!(
+        parse_login_provider_selection_input("", &providers)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        parse_login_provider_selection_input("skip", &providers)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        parse_login_provider_selection_input("claude", &providers)
+            .unwrap()
+            .map(|provider| provider.id),
+        Some("claude")
+    );
+    let first_provider = providers[0].id;
+    assert_eq!(
+        parse_login_provider_selection_input("1", &providers)
+            .unwrap()
+            .map(|provider| provider.id),
+        Some(first_provider)
+    );
+    assert!(parse_login_provider_selection_input("not-a-provider", &providers).is_err());
+}
+
+#[test]
+fn login_provider_menu_shows_autodetected_auth_and_skip() {
+    let providers = vec![
+        provider_catalog::CLAUDE_LOGIN_PROVIDER,
+        provider_catalog::OPENAI_LOGIN_PROVIDER,
+    ];
+    let status = auth::AuthStatus {
+        anthropic: auth::ProviderAuth {
+            state: auth::AuthState::Available,
+            has_oauth: true,
+            oauth_state: auth::AuthState::Available,
+            has_api_key: false,
+        },
+        ..Default::default()
+    };
+
+    let menu = render_login_provider_selection_menu("Choose a provider:", &providers, &status);
+    assert!(menu.contains("Autodetected auth:"));
+    assert!(menu.contains("Anthropic/Claude: configured: OAuth"));
+    assert!(menu.contains("[configured"));
+    assert!(menu.contains("[not configured"));
+    assert!(menu.contains("Skip: press Enter"));
+}
+
+#[test]
 fn choice_for_login_provider_round_trips_core_targets() {
     assert_eq!(
         choice_for_login_provider(provider_catalog::JCODE_LOGIN_PROVIDER),
@@ -255,6 +501,10 @@ fn choice_for_login_provider_round_trips_core_targets() {
     assert_eq!(
         choice_for_login_provider(provider_catalog::OPENROUTER_LOGIN_PROVIDER),
         Some(ProviderChoice::Openrouter)
+    );
+    assert_eq!(
+        choice_for_login_provider(provider_catalog::ANTHROPIC_API_LOGIN_PROVIDER),
+        Some(ProviderChoice::AnthropicApi)
     );
     assert_eq!(
         choice_for_login_provider(provider_catalog::AZURE_LOGIN_PROVIDER),
@@ -284,6 +534,88 @@ fn choice_for_login_provider_round_trips_openai_compatible_profiles() {
         choice_for_login_provider(provider_catalog::OPENAI_COMPAT_LOGIN_PROVIDER),
         Some(ProviderChoice::OpenaiCompatible)
     );
+    assert_eq!(
+        choice_for_login_provider(provider_catalog::MUSE_SUBSCRIPTION_LOGIN_PROVIDER),
+        Some(ProviderChoice::MuseSubscription)
+    );
+    assert_eq!(
+        login_provider_for_choice(&ProviderChoice::MuseSubscription).map(|p| p.id),
+        Some("muse-subscription")
+    );
+}
+
+#[test]
+fn login_provider_choice_table_round_trips_catalog_providers() {
+    let mut seen_choices = HashSet::new();
+    let mut reverse_mapped_provider_ids = HashSet::new();
+
+    for (choice, provider) in login_provider_choice_mappings() {
+        assert!(
+            seen_choices.insert(choice.as_arg_value()),
+            "duplicate provider choice mapping for {}",
+            choice.as_arg_value()
+        );
+        assert_eq!(
+            login_provider_for_choice(choice).map(|candidate| candidate.id),
+            Some(provider.id),
+            "choice {} should resolve to {}",
+            choice.as_arg_value(),
+            provider.id
+        );
+
+        if reverse_mapped_provider_ids.insert(provider.id) {
+            assert_eq!(
+                choice_for_login_provider(*provider),
+                Some(*choice),
+                "provider {} should reverse-map to {}",
+                provider.id,
+                choice.as_arg_value()
+            );
+        }
+    }
+
+    for provider in provider_catalog::login_providers() {
+        if matches!(
+            provider.target,
+            provider_catalog::LoginProviderTarget::AutoImport
+        ) {
+            assert_eq!(choice_for_login_provider(*provider), None);
+        } else {
+            assert!(
+                reverse_mapped_provider_ids.contains(provider.id),
+                "provider {} is in the catalog but not the CLI choice table",
+                provider.id
+            );
+        }
+    }
+}
+
+#[test]
+fn auth_integration_registry_matches_cli_choice_runtime_wiring() {
+    for provider in provider_catalog::login_providers() {
+        let integration = crate::auth::integration::auth_provider_integration(provider.id)
+            .expect("catalog provider should have integration metadata");
+        assert_eq!(integration.descriptor, *provider);
+
+        if !matches!(
+            provider.target,
+            provider_catalog::LoginProviderTarget::AutoImport
+        ) {
+            assert!(
+                choice_for_login_provider(*provider).is_some(),
+                "provider {} is missing a CLI choice mapping",
+                provider.id
+            );
+        }
+
+        let status = auth::AuthStatus::default();
+        let assessment = status.assessment_for_provider(*provider);
+        assert!(
+            !assessment.method_detail.is_empty(),
+            "provider {} should have non-empty auth status method detail",
+            provider.id
+        );
+    }
 }
 
 #[test]
@@ -317,6 +649,138 @@ fn resolved_profile_default_model_uses_openai_compatible_override() {
     }
 }
 
+#[test]
+fn apply_login_provider_profile_env_keeps_an_explicit_named_profile() {
+    // Regression for #712: `auth-test --provider-profile <name>` cleared
+    // JCODE_NAMED_PROVIDER_PROFILE before probing, so the probe evaluated the
+    // built-in generic openai-compatible slot and false-negatived every custom
+    // named profile.
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+    for (key, _) in &saved {
+        crate::env::remove_var(key);
+    }
+
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "company-gateway");
+    crate::env::set_var("JCODE_OPENROUTER_API_BASE", "https://gw.example.com/v1");
+    crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", "COMPANY_GATEWAY_KEY");
+
+    apply_login_provider_profile_env(provider_catalog::OPENCODE_GO_LOGIN_PROVIDER);
+
+    assert_eq!(
+        std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+            .ok()
+            .as_deref(),
+        Some("company-gateway"),
+        "explicit named profile must survive the auth-test probe setup"
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        Some("https://gw.example.com/v1"),
+        "named profile runtime env must not be replaced by a builtin profile"
+    );
+
+    for (key, value) in saved {
+        match value {
+            Some(value) => crate::env::set_var(&key, value),
+            None => crate::env::remove_var(&key),
+        }
+    }
+}
+
+#[test]
+fn apply_login_provider_profile_env_preserves_compatible_profile_for_auto_spawn() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+
+    for (key, _) in &saved {
+        crate::env::remove_var(key);
+    }
+
+    apply_login_provider_profile_env(provider_catalog::OPENCODE_GO_LOGIN_PROVIDER);
+
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        Some("https://opencode.ai/zen/go/v1")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("OPENCODE_GO_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
+        Some("opencode-go.env")
+    );
+    assert_eq!(
+        std::env::var("JCODE_PROVIDER_PROFILE_ACTIVE")
+            .ok()
+            .as_deref(),
+        Some("1")
+    );
+
+    // Mirrors the daemon child process starting with `--provider auto`: with the
+    // active marker present, auto init must not erase the selected profile env.
+    provider_catalog::apply_openai_compatible_profile_env(None);
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("OPENCODE_GO_API_KEY")
+    );
+
+    // A later explicit compatible-provider selection in the same process must
+    // still replace the active profile instead of being blocked by the marker.
+    apply_login_provider_profile_env(provider_catalog::OPENCODE_LOGIN_PROVIDER);
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("OPENCODE_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_PROVIDER_PROFILE_ACTIVE")
+            .ok()
+            .as_deref(),
+        Some("1")
+    );
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(&key, value);
+        } else {
+            crate::env::remove_var(&key);
+        }
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::await_holding_lock,
@@ -334,8 +798,10 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_FORCE_PROVIDER",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
         "JCODE_ACTIVE_PROVIDER",
     ]
     .iter()
@@ -370,15 +836,224 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
         Some("1")
     );
     assert_eq!(
-        std::env::var("JCODE_FORCE_PROVIDER").ok().as_deref(),
+        std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
+            .ok()
+            .as_deref(),
         Some("1")
     );
     assert_eq!(
         std::env::var("JCODE_ACTIVE_PROVIDER").ok().as_deref(),
         Some("openrouter")
     );
-    assert_eq!(provider.name(), "OpenRouter");
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref(),
+        Some("openai-compatible")
+    );
+    assert_eq!(provider.name(), "openrouter");
     assert_eq!(provider.model(), "llama3.2");
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(&key, value);
+        } else {
+            crate::env::remove_var(&key);
+        }
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global runtime env"
+)]
+async fn auto_provider_uses_config_default_named_no_auth_provider() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_HOME",
+        "JCODE_NON_INTERACTIVE",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ] {
+        crate::env::remove_var(key);
+    }
+    std::fs::write(
+        dir.path().join("config.toml"),
+        r#"
+[provider]
+default_provider = "ollama-local"
+default_model = "llama3.1:8b"
+
+[providers.ollama-local]
+type = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+auth = "none"
+default_model = "llama3.1:8b"
+requires_api_key = false
+
+[[providers.ollama-local.models]]
+id = "llama3.1:8b"
+"#,
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let provider = init_provider_for_validation(&ProviderChoice::Auto, None)
+        .await
+        .expect("auto provider should honor config default_provider named profile");
+
+    assert_eq!(provider.model(), "llama3.1:8b");
+    assert!(provider.model_routes().iter().any(|route| {
+        route.provider == "ollama-local" && route.model == "llama3.1:8b" && route.available
+    }));
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(&key, value);
+        } else {
+            crate::env::remove_var(&key);
+        }
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
+)]
+async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_blocking() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_HOME",
+        "JCODE_NON_INTERACTIVE",
+        "JCODE_DEFERRED_AUTH_BOOTSTRAP",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+    for key in [
+        "JCODE_DEFERRED_AUTH_BOOTSTRAP",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ] {
+        crate::env::remove_var(key);
+    }
+
+    let opencode_path = crate::auth::claude::ExternalClaudeAuthSource::OpenCode
+        .path()
+        .expect("opencode path");
+    std::fs::create_dir_all(opencode_path.parent().expect("opencode parent"))
+        .expect("create opencode dir");
+    std::fs::write(
+        &opencode_path,
+        serde_json::json!({
+            "anthropic": {
+                "access": "oc_acc",
+                "refresh": "oc_ref",
+                "expires": chrono::Utc::now().timestamp_millis() + 60_000
+            }
+        })
+        .to_string(),
+    )
+    .expect("write opencode auth");
+
+    let result = init_provider_for_validation(&ProviderChoice::Auto, None).await;
+    let err = match result {
+        Ok(provider) => panic!(
+            "auto init should still fail without trusted/direct credentials, got provider {}",
+            provider.name()
+        ),
+        Err(err) => err,
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("No credentials configured"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        !message.contains("will not read them without confirmation"),
+        "auto mode should skip untrusted external auth, not fail with the consent prompt error: {message}"
+    );
+
+    // Production `serve` must bind before Desktop can sign in, without a
+    // launcher-specific deferred-auth environment variable.
+    let daemon_provider = init_provider_for_serve(&ProviderChoice::Auto, None)
+        .await
+        .expect("credential-free daemon should support onboarding");
+    let request_error = match daemon_provider.complete(&[], &[], "test", None).await {
+        Ok(_) => panic!("model work must not succeed without credentials"),
+        Err(err) => err.to_string(),
+    };
+    assert!(request_error.contains("not configured"), "{request_error}");
+    assert!(request_error.contains("/login"), "{request_error}");
+
+    // Serve opts in locally, rather than leaking a process-wide exemption.
+    assert!(std::env::var_os("JCODE_DEFERRED_AUTH_BOOTSTRAP").is_none());
+    assert!(init_provider(&ProviderChoice::Auto, None).await.is_err());
 
     for (key, value) in saved {
         if let Some(value) = value {
@@ -433,11 +1108,12 @@ fn pending_external_auth_review_candidates_include_shared_and_legacy_sources() {
 
     let candidates = pending_external_auth_review_candidates().expect("candidates");
     assert!(candidates.iter().any(|candidate| {
-        candidate.source_name == "OpenCode auth.json"
-            && candidate.provider_summary.contains("OpenAI/Codex")
+        candidate.source_name() == "OpenCode auth.json"
+            && candidate.provider_summary().contains("OpenAI/Codex")
     }));
     assert!(candidates.iter().any(|candidate| {
-        candidate.source_name == "Codex auth.json" && candidate.provider_summary == "OpenAI/Codex"
+        candidate.source_name() == "Codex auth.json"
+            && candidate.provider_summary() == "OpenAI/Codex"
     }));
 
     if let Some(prev_home) = prev_home {
@@ -445,4 +1121,27 @@ fn pending_external_auth_review_candidates_include_shared_and_legacy_sources() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn env_model_for_choice_only_targets_openrouter_slot_runtimes() {
+    let env = Some("mistralai/mistral-large-4-0");
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Openrouter, env),
+        env
+    );
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Deepseek, env),
+        env
+    );
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Claude, env),
+        None
+    );
+    assert_eq!(env_model_for_choice_from(&ProviderChoice::Auto, env), None);
+    assert_eq!(env_model_for_choice_from(&ProviderChoice::Jcode, env), None);
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Openrouter, None),
+        None
+    );
 }

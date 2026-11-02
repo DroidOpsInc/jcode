@@ -1,169 +1,133 @@
 import SwiftUI
 
+/// Lightweight markdown renderer for assistant messages.
+///
+/// Handles fenced code blocks as monospaced cards and renders everything else
+/// through SwiftUI's native AttributedString markdown (bold, italics, inline
+/// code, links). Deliberately not a full CommonMark implementation.
 struct MarkdownText: View {
     let text: String
 
+    init(_ text: String) {
+        self.text = text
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: JC.Spacing.sm) {
-            ForEach(Array(parse(text).enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .paragraph(let text):
-                    Text(inlineMarkdown(text))
-                        .font(JC.Fonts.stream)
-                        .foregroundStyle(JC.Colors.aiText)
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .prose(let prose):
+                    Text(attributed(prose))
+                        .font(.body)
+                        .foregroundStyle(Theme.textPrimary)
+                        .tint(Theme.mint)
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
-
-                case .code(let language, let code):
-                    VStack(alignment: .leading, spacing: 0) {
-                        if !language.isEmpty {
-                            HStack {
-                                Text(language)
-                                    .font(JC.Fonts.monoCaption)
-                                    .foregroundStyle(JC.Colors.textTertiary)
-                                Spacer()
-                            }
-                            .padding(.horizontal, JC.Spacing.md)
-                            .padding(.top, JC.Spacing.sm)
-                            .padding(.bottom, JC.Spacing.xs)
-                        }
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            Text(code)
-                                .font(JC.Fonts.mono)
-                                .foregroundStyle(JC.Colors.textPrimary)
-                                .textSelection(.enabled)
-                                .padding(.horizontal, JC.Spacing.md)
-                                .padding(.vertical, JC.Spacing.sm)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(JC.Colors.codeBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: JC.Radius.sm, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: JC.Radius.sm, style: .continuous)
-                            .stroke(JC.Colors.codeBorder, lineWidth: 1)
-                    )
-
-                case .heading(let level, let text):
-                    Text(inlineMarkdown(text))
-                        .font(headingFont(level))
-                        .foregroundStyle(JC.Colors.textPrimary)
-                        .textSelection(.enabled)
-
-                case .listItem(let text):
-                    HStack(alignment: .firstTextBaseline, spacing: JC.Spacing.sm) {
-                        Text("\u{2022}")
-                            .font(JC.Fonts.body)
-                            .foregroundStyle(JC.Colors.accent)
-                        Text(inlineMarkdown(text))
-                            .font(JC.Fonts.body)
-                            .foregroundStyle(JC.Colors.textPrimary)
-                            .textSelection(.enabled)
-                    }
-
-                case .divider:
-                    Divider()
-                        .overlay(JC.Colors.border)
+                case .code(let code, let language):
+                    CodeBlock(code: code, language: language)
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func headingFont(_ level: Int) -> Font {
-        switch level {
-        case 1: JC.Fonts.title2
-        case 2: JC.Fonts.headline
-        case 3: .system(size: 15, weight: .semibold)
-        default: .system(size: 14, weight: .medium)
+    private enum Segment {
+        case prose(String)
+        case code(String, language: String?)
+    }
+
+    private var segments: [Segment] {
+        var result: [Segment] = []
+        var prose: [String] = []
+        var code: [String] = []
+        var language: String?
+        var inCode = false
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("```") {
+                if inCode {
+                    result.append(.code(code.joined(separator: "\n"), language: language))
+                    code = []
+                    inCode = false
+                } else {
+                    let joined = prose.joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !joined.isEmpty {
+                        result.append(.prose(joined))
+                    }
+                    prose = []
+                    language = line.dropFirst(3).isEmpty ? nil : String(line.dropFirst(3))
+                    inCode = true
+                }
+            } else if inCode {
+                code.append(String(line))
+            } else {
+                prose.append(String(line))
+            }
         }
+        if inCode {
+            result.append(.code(code.joined(separator: "\n"), language: language))
+        } else {
+            let joined = prose.joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty {
+                result.append(.prose(joined))
+            }
+        }
+        return result
     }
 
-    private func inlineMarkdown(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+    private func attributed(_ string: String) -> AttributedString {
+        (try? AttributedString(
+            markdown: string,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(string)
     }
 }
 
-private enum Block {
-    case paragraph(String)
-    case code(language: String, code: String)
-    case heading(level: Int, text: String)
-    case listItem(String)
-    case divider
-}
+/// Fenced code block: language chip, copy action, horizontal scroll.
+private struct CodeBlock: View {
+    let code: String
+    let language: String?
 
-private func parse(_ text: String) -> [Block] {
-    var blocks: [Block] = []
-    let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-    var i = 0
-
-    while i < lines.count {
-        let line = lines[i]
-
-        if line.hasPrefix("```") {
-            let language = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-            var codeLines: [String] = []
-            i += 1
-            while i < lines.count && !lines[i].hasPrefix("```") {
-                codeLines.append(lines[i])
-                i += 1
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text((language?.isEmpty == false ? language! : "code").lowercased())
+                    .font(Theme.mono(10, weight: .medium))
+                    .foregroundStyle(Theme.textTertiary)
+                Spacer(minLength: 0)
+                Button {
+                    UIPasteboard.general.string = code
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 32, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressableButtonStyle(scale: 0.9))
+                .accessibilityLabel("Copy code")
             }
-            if i < lines.count { i += 1 }
-            blocks.append(.code(language: language, code: codeLines.joined(separator: "\n")))
-            continue
-        }
-
-        if line.hasPrefix("# ") {
-            blocks.append(.heading(level: 1, text: String(line.dropFirst(2))))
-            i += 1
-            continue
-        }
-        if line.hasPrefix("## ") {
-            blocks.append(.heading(level: 2, text: String(line.dropFirst(3))))
-            i += 1
-            continue
-        }
-        if line.hasPrefix("### ") {
-            blocks.append(.heading(level: 3, text: String(line.dropFirst(4))))
-            i += 1
-            continue
-        }
-
-        if line.hasPrefix("- ") || line.hasPrefix("* ") {
-            blocks.append(.listItem(String(line.dropFirst(2))))
-            i += 1
-            continue
-        }
-
-        if let match = line.range(of: #"^\d+\.\s+"#, options: .regularExpression) {
-            blocks.append(.listItem(String(line[match.upperBound...])))
-            i += 1
-            continue
-        }
-
-        if line.allSatisfy({ $0 == "-" || $0 == " " }) && line.filter({ $0 == "-" }).count >= 3 {
-            blocks.append(.divider)
-            i += 1
-            continue
-        }
-
-        if line.trimmingCharacters(in: .whitespaces).isEmpty {
-            i += 1
-            continue
-        }
-
-        var paragraphLines = [line]
-        i += 1
-        while i < lines.count {
-            let next = lines[i]
-            if next.trimmingCharacters(in: .whitespaces).isEmpty ||
-               next.hasPrefix("```") || next.hasPrefix("# ") ||
-               next.hasPrefix("- ") || next.hasPrefix("* ") {
-                break
+            .padding(.leading, 12)
+            .padding(.trailing, 4)
+            .padding(.vertical, 2)
+            .background(Theme.surfaceElevated)
+            Hairline()
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(Theme.mono(12))
+                    .foregroundStyle(Theme.textPrimary.opacity(0.85))
+                    .padding(12)
+                    .textSelection(.enabled)
             }
-            paragraphLines.append(next)
-            i += 1
         }
-        blocks.append(.paragraph(paragraphLines.joined(separator: "\n")))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        )
     }
-
-    return blocks
 }

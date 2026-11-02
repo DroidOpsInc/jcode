@@ -288,6 +288,14 @@ struct Args {
     /// Keep any existing mermaid cache instead of forcing a cold-cache benchmark start
     #[arg(long, default_value_t = false)]
     keep_mermaid_cache: bool,
+
+    /// Number of inline images in the simulated transcript (--mode image-scroll)
+    #[arg(long, default_value = "60")]
+    images: usize,
+
+    /// Number of inline images visible per frame (--mode image-scroll)
+    #[arg(long, default_value = "3")]
+    images_visible: usize,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -296,8 +304,10 @@ enum BenchMode {
     Streaming,
     FileDiff,
     SidePanel,
+    CopySelection,
     MermaidUi,
     MermaidFlicker,
+    ImageScroll,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -348,6 +358,8 @@ struct BenchState {
     linked_refresh_path: Option<PathBuf>,
     linked_refresh_generation: usize,
     session_source: Option<String>,
+    copy_selection_range: Option<jcode::tui::CopySelectionRange>,
+    copy_selection_mode: bool,
 }
 
 impl BenchState {
@@ -400,6 +412,7 @@ impl BenchState {
                         "new_string": format!("target line {} updated", idx),
                     }),
                     intent: None,
+                    thought_signature: None,
                 };
                 let tool_output = format!(
                     "{line}- target line {idx}\n{line}+ target line {idx} updated",
@@ -450,6 +463,8 @@ impl BenchState {
                 .flatten(),
             linked_refresh_generation: 0,
             session_source: None,
+            copy_selection_range: None,
+            copy_selection_mode: matches!(mode, BenchMode::CopySelection),
         })
     }
 
@@ -526,6 +541,8 @@ impl BenchState {
             linked_refresh_path: None,
             linked_refresh_generation: 0,
             session_source: Some(session.id),
+            copy_selection_range: None,
+            copy_selection_mode: matches!(mode, BenchMode::CopySelection),
         })
     }
 
@@ -628,7 +645,12 @@ fn stored_message_visible_text(message: &jcode::session::StoredMessage) -> Strin
             ContentBlock::Image { media_type, .. } => {
                 parts.push(format!("[image:{}]", media_type));
             }
-            ContentBlock::OpenAICompaction { .. } => {}
+            ContentBlock::OpenAICompaction { .. }
+            | ContentBlock::AnthropicThinking { .. }
+            | ContentBlock::ReasoningTrace { .. }
+            | ContentBlock::OpenAIReasoning { .. }
+            | ContentBlock::ToolReference { .. }
+            | ContentBlock::ProviderNative { .. } => {}
         }
     }
     parts.join("\n\n")
@@ -677,6 +699,7 @@ fn reconstruct_side_panel_snapshot_from_session(session: &Session) -> SidePanelS
                             title: title.clone(),
                             file_path: format!("session://{}/{}.md", session.id, page_id),
                             format: SidePanelPageFormat::Markdown,
+                            pdf_data: None,
                             source: SidePanelPageSource::Managed,
                             content: String::new(),
                             updated_at_ms: revision,
@@ -738,6 +761,7 @@ fn reconstruct_side_panel_snapshot_from_session(session: &Session) -> SidePanelS
                             title,
                             file_path: file_path.to_string(),
                             format: SidePanelPageFormat::Markdown,
+                            pdf_data: None,
                             source: SidePanelPageSource::LinkedFile,
                             content,
                             updated_at_ms: revision,
@@ -781,6 +805,7 @@ fn reconstruct_side_panel_snapshot_from_session(session: &Session) -> SidePanelS
     }
 
     SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id,
         pages,
     }
@@ -1058,6 +1083,10 @@ impl TuiState for BenchState {
         40
     }
 
+    fn diagram_pane_ratio_user_adjusted(&self) -> bool {
+        false
+    }
+
     fn diagram_pane_animating(&self) -> bool {
         false
     }
@@ -1079,6 +1108,9 @@ impl TuiState for BenchState {
     fn diff_pane_scroll_x(&self) -> i32 {
         self.diff_pane_scroll_x
     }
+    fn side_panel_image_zoom_percent(&self) -> u8 {
+        100
+    }
     fn diff_pane_focus(&self) -> bool {
         self.diff_pane_focus
     }
@@ -1097,9 +1129,6 @@ impl TuiState for BenchState {
         jcode::config::config().display.native_scrollbars.side_panel
     }
 
-    fn diff_line_wrap(&self) -> bool {
-        true
-    }
     fn inline_interactive_state(&self) -> Option<&jcode::tui::InlineInteractiveState> {
         None
     }
@@ -1149,11 +1178,11 @@ impl TuiState for BenchState {
     }
 
     fn copy_selection_mode(&self) -> bool {
-        false
+        self.copy_selection_mode
     }
 
     fn copy_selection_range(&self) -> Option<jcode::tui::CopySelectionRange> {
-        None
+        self.copy_selection_range
     }
 
     fn copy_selection_status(&self) -> Option<jcode::tui::CopySelectionStatus> {
@@ -1247,6 +1276,52 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if matches!(args.mode, BenchMode::ImageScroll) {
+        let result = jcode::tui::mermaid::debug_image_scroll_benchmark(
+            args.images,
+            args.frames.max(4),
+            args.images_visible,
+        );
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+        println!("mode: {:?}", args.mode);
+        println!("protocol: {}", result.protocol.as_deref().unwrap_or("none"));
+        println!("images: {}", result.images);
+        println!("frames: {}", result.frames);
+        println!("visible_per_frame: {}", result.visible_per_frame);
+        println!("frame_avg_ms: {:.4}", result.frame_timing.avg_ms);
+        println!("frame_p95_ms: {:.4}", result.frame_timing.p95_ms);
+        println!("frame_p99_ms: {:.4}", result.frame_timing.p99_ms);
+        println!("frame_max_ms: {:.4}", result.frame_timing.max_ms);
+        println!("cache_stat_syscalls: {}", result.cache_stat_syscalls);
+        println!(
+            "cache_stat_syscalls_per_frame: {:.4}",
+            result.cache_stat_syscalls_per_frame
+        );
+        println!("visible_draw_skips: {}", result.visible_draw_skips);
+        println!("fit_protocol_rebuilds: {}", result.fit_protocol_rebuilds);
+        println!("fit_state_reuse_hits: {}", result.fit_state_reuse_hits);
+        println!(
+            "retained_image_state_source_bytes: {}",
+            result.retained_image_state_source_bytes
+        );
+        println!(
+            "retained_source_cache_decoded_bytes: {}",
+            result.retained_source_cache_decoded_bytes
+        );
+        println!(
+            "retained_fitted_source_decoded_bytes: {}",
+            result.retained_fitted_source_decoded_bytes
+        );
+        println!(
+            "retained_working_set_estimate_bytes: {}",
+            result.retained_working_set_estimate_bytes
+        );
+        return Ok(());
+    }
+
     if matches!(args.mode, BenchMode::FileDiff) {
         state.diff_mode = jcode::config::DiffDisplayMode::File;
     }
@@ -1274,6 +1349,8 @@ fn main() -> Result<()> {
 
     let start = Instant::now();
     let mut frame_times_ms: Vec<f64> = Vec::with_capacity(args.frames);
+    let mut copy_extract_times_ms: Vec<f64> = Vec::new();
+    let mut copy_extract_bytes: usize = 0;
     let mut side_panel_profiles: Vec<SidePanelFrameProfile> = Vec::new();
     for frame in 0..args.frames {
         if args.scroll_cycle > 0 {
@@ -1298,6 +1375,23 @@ fn main() -> Result<()> {
             state.is_processing = true;
             state.status = ProcessingStatus::Streaming;
         }
+        if matches!(args.mode, BenchMode::CopySelection) {
+            let start_line = state.scroll_offset;
+            let visible_lines = args.height.saturating_sub(6).max(1) as usize;
+            let end_line = start_line.saturating_add(visible_lines.saturating_sub(1));
+            state.copy_selection_range = Some(jcode::tui::CopySelectionRange {
+                start: jcode::tui::CopySelectionPoint {
+                    pane: jcode::tui::CopySelectionPane::Chat,
+                    abs_line: start_line,
+                    column: 0,
+                },
+                end: jcode::tui::CopySelectionPoint {
+                    pane: jcode::tui::CopySelectionPane::Chat,
+                    abs_line: end_line,
+                    column: usize::MAX / 4,
+                },
+            });
+        }
         let markdown_before = profile_side_panel.then(jcode::tui::markdown::debug_stats);
         let mermaid_before = profile_side_panel.then(jcode::tui::mermaid::debug_stats);
         let side_panel_before = profile_side_panel.then(jcode::tui::side_panel_debug_stats);
@@ -1305,6 +1399,17 @@ fn main() -> Result<()> {
         terminal.draw(|f| jcode::tui::render_frame(f, &state))?;
         let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         frame_times_ms.push(frame_ms);
+        if matches!(args.mode, BenchMode::CopySelection)
+            && frame >= args.warmup_frames
+            && frame % 8 == 0
+            && let Some(range) = state.copy_selection_range
+        {
+            let copy_start = Instant::now();
+            if let Some(text) = jcode::tui::debug_copy_selection_text_for_bench(range) {
+                copy_extract_bytes = copy_extract_bytes.saturating_add(text.len());
+            }
+            copy_extract_times_ms.push(copy_start.elapsed().as_secs_f64() * 1000.0);
+        }
         if let (Some(markdown_before), Some(mermaid_before), Some(side_panel_before)) =
             (markdown_before, mermaid_before, side_panel_before)
         {
@@ -1451,7 +1556,15 @@ fn main() -> Result<()> {
                 "warm": warm_summary,
                 "fps": fps,
                 "avg_total_ms": avg_ms,
-            }
+            },
+            "copy_selection": if matches!(args.mode, BenchMode::CopySelection) {
+                Some(json!({
+                    "extract_every_n_frames": 8,
+                    "extract_samples": copy_extract_times_ms.len(),
+                    "extract_bytes": copy_extract_bytes,
+                    "extract_timing": summarize_timing(&copy_extract_times_ms),
+                }))
+            } else { None }
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());

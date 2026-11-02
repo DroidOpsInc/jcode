@@ -8,6 +8,7 @@
 #   epic for the harness-engine adapter milestone.
 
 stages:
+  - check
   - upstream-sync
 
 variables:
@@ -18,8 +19,8 @@ variables:
 # so a fast-forward is impossible; history is merged, never rewritten or rebased.
 # On a merge conflict the job aborts the merge, opens (or reuses) an issue and fails.
 # Schedule with: variable UPSTREAM_SYNC=true and a daily cadence.
-# Requires CI variable UPSTREAM_SYNC_TOKEN (project access token, write_repository scope;
-# add api scope so the conflict issue can be opened).
+# Requires CI variable UPSTREAM_SYNC_TOKEN: project access token "upstream-sync"
+# (Maintainer, scopes api + write_repository; api is needed to open the conflict issue).
 upstream-sync:
   stage: upstream-sync
   image: alpine/git:latest
@@ -57,4 +58,35 @@ upstream-sync:
     - |
       git push "https://oauth2:${UPSTREAM_SYNC_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
         "${UPSTREAM_BRANCH}" --tags
+  interruptible: true
+
+# Gate: a trial merge of upstream into the MR head, so a change that will conflict
+# with the next daily upstream-sync (for example edits to files upstream moved or
+# deleted) is visible on the MR before it merges. Warning only (allow_failure):
+# the fork is expected to carry local divergence, and upstream churn must not block
+# unrelated MRs; a red-with-warning job means "resolve the merge soon".
+upstream-merge-check:
+  stage: check
+  image: alpine/git:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  allow_failure: true
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - git config user.email "ci@droidopsinc.dev"
+    - git config user.name "DroidOps CI (jcode merge check)"
+    - git remote add upstream "${UPSTREAM_URL}" || git remote set-url upstream "${UPSTREAM_URL}"
+    - git fetch --quiet upstream "${UPSTREAM_BRANCH}"
+    - |
+      if git merge --no-commit --no-ff "upstream/${UPSTREAM_BRANCH}"; then
+        git merge --abort || true
+        echo "OK: upstream/${UPSTREAM_BRANCH} merges cleanly into this MR."
+      else
+        echo "CONFLICTS with upstream/${UPSTREAM_BRANCH}:"
+        git diff --name-only --diff-filter=U
+        git merge --abort || true
+        echo "Resolve by merging upstream into the default branch (see upstream-sync)."
+        exit 1
+      fi
   interruptible: true

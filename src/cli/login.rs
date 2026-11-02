@@ -6,12 +6,19 @@ use std::path::{Path, PathBuf};
 use crate::auth;
 use crate::provider_catalog::{
     LoginProviderDescriptor, LoginProviderTarget, OPENAI_COMPAT_LOCAL_ENABLED_ENV,
-    OpenAiCompatibleProfile, resolve_login_selection, resolve_openai_compatible_profile,
+    OpenAiCompatibleProfile, resolve_openai_compatible_profile,
 };
 
-use super::provider_init::{ProviderChoice, login_provider_for_choice, save_named_api_key};
+use super::provider_init::{ProviderChoice, login_provider_for_choice};
+use crate::provider_catalog::save_named_api_key;
 
+mod device_login;
+mod existing_key_notice;
+mod google;
+mod jcode_device;
+mod next_step;
 mod scriptable;
+use google::*;
 use scriptable::*;
 
 #[derive(Debug, Clone, Default)]
@@ -22,10 +29,36 @@ pub struct LoginOptions {
     pub auth_code: Option<String>,
     pub json: bool,
     pub complete: bool,
+    pub flow_id: Option<String>,
+    pub cancel: bool,
+    pub no_validate: bool,
     pub google_access_tier: Option<auth::google::GmailAccessTier>,
+    pub google_services: Option<Vec<auth::google::GoogleService>>,
+    /// Run the guided Google Cloud OAuth client setup even when a client is saved.
+    pub google_setup: bool,
+    /// OAuth client JSON path (or `auto`) to import before Google login.
+    pub google_client_json: Option<String>,
+    pub openai_compatible_api_base: Option<String>,
+    pub openai_compatible_api_key: Option<String>,
+    pub openai_compatible_api_key_env: Option<String>,
+    pub openai_compatible_default_model: Option<String>,
 }
 
 impl LoginOptions {
+    fn validate(&self) -> Result<()> {
+        if let Some(flow_id) = &self.flow_id {
+            parse_login_flow_id(flow_id).map_err(anyhow::Error::msg)?;
+        }
+        if self.cancel {
+            anyhow::ensure!(self.flow_id.is_some(), "--cancel requires --flow-id.");
+            anyhow::ensure!(
+                !self.print_auth_url && !self.complete && !self.has_provided_input(),
+                "--cancel cannot be combined with login begin or completion flags."
+            );
+        }
+        Ok(())
+    }
+
     fn has_provided_input(&self) -> bool {
         self.callback_url.is_some() || self.auth_code.is_some()
     }
@@ -46,8 +79,26 @@ impl LoginOptions {
     }
 
     fn uses_scriptable_flow(&self) -> Result<bool> {
-        Ok(self.print_auth_url || self.complete || self.has_provided_input())
+        Ok(self.print_auth_url
+            || self.complete
+            || self.has_provided_input()
+            || self.flow_id.is_some()
+            || self.cancel)
     }
+}
+
+pub(crate) fn parse_login_flow_id(value: &str) -> std::result::Result<String, String> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(
+            "--flow-id must contain 1-64 ASCII letters, digits, underscores or hyphens.".into(),
+        );
+    }
+    Ok(value.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -90,8 +141,18 @@ enum PendingScriptableLogin {
         state: String,
         redirect_uri: String,
         tier: auth::google::GmailAccessTier,
+        /// Missing in pending files written by older builds, which only
+        /// requested Gmail.
+        #[serde(default = "default_pending_google_services")]
+        services: Vec<auth::google::GoogleService>,
     },
     Copilot {
+        device_code: String,
+        user_code: String,
+        verification_uri: String,
+        interval: u64,
+    },
+    MuseSubscription {
         device_code: String,
         user_code: String,
         verification_uri: String,
@@ -114,11 +175,12 @@ impl PendingScriptableLogin {
             Self::Antigravity { .. } => "antigravity",
             Self::Google { .. } => "google",
             Self::Copilot { .. } => "copilot",
+            Self::MuseSubscription { .. } => "muse-subscription",
         }
     }
 
-    fn pending_path(&self) -> Result<PathBuf> {
-        pending_login_path(self.key())
+    fn pending_path(&self, flow_id: Option<&str>) -> Result<PathBuf> {
+        pending_login_path(self.key(), flow_id)
     }
 
     fn default_expires_at_ms(&self) -> i64 {
@@ -147,17 +209,14 @@ struct ScriptableAuthSuccess {
     email: Option<String>,
 }
 
+#[allow(deprecated)]
 pub async fn run_login(
     choice: &ProviderChoice,
     account_label: Option<&str>,
     options: LoginOptions,
 ) -> Result<()> {
+    options.validate()?;
     if let Some(provider) = login_provider_for_choice(choice) {
-        if matches!(choice, ProviderChoice::ClaudeSubprocess) {
-            eprintln!(
-                "Warning: Claude subprocess transport is deprecated and will be removed. Direct Anthropic API is already the default for `--provider claude`."
-            );
-        }
         return run_login_provider(provider, account_label, options).await;
     }
 
@@ -180,43 +239,15 @@ pub async fn run_login(
                 && imported > 0
             {
                 eprintln!("\nImported {} existing auth source(s).", imported);
+                notify_running_server_auth_changed_best_effort(None).await;
                 return Ok(());
             }
-            eprintln!("Choose a provider to log in:");
-            for (index, provider) in providers.iter().enumerate() {
-                eprintln!(
-                    "  {}. {:<16} - {}",
-                    index + 1,
-                    provider.display_name,
-                    provider.menu_detail
-                );
-            }
-            eprintln!();
-            let recommended = providers
-                .iter()
-                .filter(|provider| provider.recommended)
-                .map(|provider| provider.display_name)
-                .collect::<Vec<_>>();
-            if !recommended.is_empty() {
-                eprintln!(
-                    "  Recommended if you have a subscription: {}.",
-                    recommended.join(", ")
-                );
-            }
-            eprint!("\nEnter 1-{}: ", providers.len());
-            io::stdout().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if let Some(provider) = resolve_login_selection(input.trim(), &providers) {
-                run_login_provider(provider, account_label, options).await?;
-            } else {
-                let valid = providers
-                    .iter()
-                    .map(|provider| provider.id)
-                    .collect::<Vec<_>>()
-                    .join("|");
-                anyhow::bail!("Invalid choice. Use --provider {}", valid);
+            match super::provider_init::prompt_login_provider_selection_optional(
+                &providers,
+                "Choose a provider to log in:",
+            )? {
+                Some(provider) => run_login_provider(provider, account_label, options).await?,
+                None => eprintln!("Login skipped."),
             }
         }
         _ => unreachable!("handled above"),
@@ -229,14 +260,57 @@ pub async fn run_login_provider(
     account_label: Option<&str>,
     options: LoginOptions,
 ) -> Result<()> {
+    options.validate()?;
+    if options.cancel {
+        return cancel_scriptable_login(provider, &options);
+    }
+    if provider.target == LoginProviderTarget::Google
+        && let Some(source) = options.google_client_json.as_deref()
+    {
+        import_google_client_json(source, options.json)?;
+    }
     crate::telemetry::record_provider_selected(provider.id);
     crate::telemetry::record_auth_started(provider.id, provider.auth_kind.label());
     let explicit_scriptable_flow = options.uses_scriptable_flow()?;
-    let auto_scriptable_reason = if explicit_scriptable_flow {
+    // Google setup is an interactive wizard. On a terminal it must run even
+    // with --no-browser (it prints each URL), otherwise a first-time user
+    // with no OAuth client is sent to a flow that can only fail.
+    let google_wizard = provider.target == LoginProviderTarget::Google
+        && !explicit_scriptable_flow
+        && io::stdin().is_terminal()
+        && (options.google_setup || auth::google::load_credentials().is_err());
+    let auto_scriptable_reason = if explicit_scriptable_flow || google_wizard {
         None
     } else {
         auto_scriptable_flow_reason(provider, &options, io::stdin().is_terminal())
     };
+    crate::logging::auth_event(
+        "login_flow_resolved",
+        provider.id,
+        &[
+            ("method", provider.auth_kind.label()),
+            (
+                "scriptable",
+                if explicit_scriptable_flow || auto_scriptable_reason.is_some() {
+                    "true"
+                } else {
+                    "false"
+                },
+            ),
+            (
+                "auto_scriptable_reason",
+                auto_scriptable_reason.unwrap_or("none"),
+            ),
+            (
+                "has_account_label",
+                if account_label.is_some() {
+                    "true"
+                } else {
+                    "false"
+                },
+            ),
+        ],
+    );
     let login_result = if explicit_scriptable_flow {
         run_scriptable_login_provider(provider, account_label, &options).await
     } else if let Some(reason) = auto_scriptable_reason {
@@ -251,7 +325,13 @@ pub async fn run_login_provider(
                 provider.display_name
             );
         }
-        start_scriptable_login(provider, account_label, &options).await
+        if provider.target == LoginProviderTarget::Google
+            && !auth::browser_suppressed(options.no_browser)
+        {
+            run_automatic_google_login(provider.id, &options).await
+        } else {
+            start_scriptable_login(provider, account_label, &options).await
+        }
     } else {
         match provider.target {
             LoginProviderTarget::AutoImport => {
@@ -266,33 +346,58 @@ pub async fn run_login_provider(
                 eprintln!("Imported {} existing auth source(s).", imported);
                 Ok(LoginFlowOutcome::Completed)
             }
-            LoginProviderTarget::Jcode => login_jcode_flow().map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Jcode => login_jcode_flow(options.no_browser)
+                .await
+                .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::Claude => login_claude_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::ClaudeApiKey => {
+                login_anthropic_api_key_flow().map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::OpenAi => login_openai_flow(account_label, options.no_browser)
+                .await
+                .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::OpenAiApiKey => {
+                login_openai_api_key_flow().map(|_| LoginFlowOutcome::Completed)
+            }
+            LoginProviderTarget::GrokBuild => login_grok_build_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::OpenRouter => {
                 login_openrouter_flow().map(|_| LoginFlowOutcome::Completed)
             }
+            LoginProviderTarget::Bedrock => {
+                login_bedrock_flow().map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::Azure => login_azure_flow().map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::OpenAiCompatible(profile)
+                if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
+            {
+                device_login::login_muse_subscription_flow(options.no_browser)
+                    .await
+                    .map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::OpenAiCompatible(profile) => {
-                login_openai_compatible_flow(&profile).map(|_| LoginFlowOutcome::Completed)
+                login_openai_compatible_flow(&profile, &options)
+                    .map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::Cursor => login_cursor_flow().map(|_| LoginFlowOutcome::Completed),
-            LoginProviderTarget::Copilot => {
-                login_copilot_flow(options.no_browser).map(|_| LoginFlowOutcome::Completed)
-            }
+            LoginProviderTarget::Copilot => device_login::login_copilot_flow(options.no_browser),
             LoginProviderTarget::Gemini => login_gemini_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::Antigravity => login_antigravity_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
-            LoginProviderTarget::Google => login_google_flow(options.no_browser)
-                .await
-                .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Google => login_google_flow(
+                options.no_browser,
+                options.google_access_tier,
+                options.google_services.clone(),
+                options.google_setup,
+            )
+            .await
+            .map(|_| LoginFlowOutcome::Completed),
         }
     };
     let outcome = match login_result {
@@ -305,6 +410,14 @@ pub async fn run_login_provider(
                 provider.auth_kind.label(),
                 reason.label(),
             );
+            crate::logging::auth_event(
+                "login_flow_failed",
+                provider.id,
+                &[
+                    ("method", provider.auth_kind.label()),
+                    ("reason", reason.label()),
+                ],
+            );
             return Err(anyhow::anyhow!(
                 crate::auth::login_diagnostics::augment_auth_error_message(
                     provider.id,
@@ -314,84 +427,184 @@ pub async fn run_login_provider(
         }
     };
     if matches!(outcome, LoginFlowOutcome::Deferred) {
+        crate::logging::auth_event(
+            "login_flow_deferred",
+            provider.id,
+            &[("method", provider.auth_kind.label())],
+        );
         return Ok(());
     }
     auth::AuthStatus::invalidate_cache();
-    if let Err(err) = super::commands::run_post_login_validation(provider).await {
-        let reason =
-            crate::auth::login_diagnostics::classify_auth_failure_message(&err.to_string());
+    if options.no_validate {
+        eprintln!("Skipping post-login provider validation (--no-validate).");
+        crate::logging::auth_event(
+            "post_login_validation_skipped",
+            provider.id,
+            &[("reason", "no_validate")],
+        );
+        maybe_persist_default_provider_after_login(provider, &options);
+        notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
+        return Ok(());
+    }
+    // Scriptable callers require exactly one JSON object on stdout. The human
+    // validation report belongs only to interactive login, including failures.
+    let validation = if options.json {
+        super::auth_test::run_post_login_validation_quiet(provider).await
+    } else {
+        super::commands::run_post_login_validation(provider).await
+    };
+    if let Err(err) = validation {
+        let error_message = err.to_string();
+        let reason = crate::auth::login_diagnostics::classify_auth_failure_message(&error_message);
         crate::telemetry::record_auth_failed_reason(
             provider.id,
             provider.auth_kind.label(),
             reason.label(),
         );
+        crate::logging::auth_event(
+            "post_login_validation_failed",
+            provider.id,
+            &[
+                ("method", provider.auth_kind.label()),
+                ("reason", reason.label()),
+            ],
+        );
         return Err(anyhow::anyhow!(
-            crate::auth::login_diagnostics::augment_auth_error_message(
-                provider.id,
-                err.to_string()
-            )
+            crate::auth::login_diagnostics::augment_auth_error_message(provider.id, error_message)
         ));
     }
     auth::AuthStatus::invalidate_cache();
+    crate::logging::auth_event(
+        "login_flow_completed",
+        provider.id,
+        &[
+            ("method", provider.auth_kind.label()),
+            ("validated", "true"),
+        ],
+    );
+    maybe_persist_default_provider_after_login(provider, &options);
+    notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
     Ok(())
 }
 
-fn login_jcode_flow() -> Result<()> {
-    eprintln!("Setting up Jcode subscription access...");
-    eprintln!(
-        "Paste the jcode subscription API key from your account portal. This key is used for your curated jcode router access.\n"
-    );
-    eprint!("Paste your Jcode API key: ");
+/// Native xAI OAuth device flow with the Grok CLI client id. Tokens are stored
+/// in the Grok CLI credential store (`$GROK_HOME/auth.json`), so an existing
+/// `grok login` is reused and this login is visible to the Grok CLI too.
+async fn login_grok_build_flow(no_browser: bool) -> Result<()> {
+    let client = crate::provider::shared_http_client();
+    let authorization = crate::auth::grok_build::initiate_device_login(&client).await?;
+    let url = authorization
+        .verification_uri_complete
+        .as_deref()
+        .unwrap_or(&authorization.verification_uri);
+    eprintln!("\nGrok Build login (xAI)");
+    eprintln!("  Open: {url}");
+    eprintln!("  Code: {}\n", authorization.user_code);
+    maybe_open_browser(url, no_browser);
+    eprintln!("Waiting for authorization...");
+    crate::auth::grok_build::complete_device_login(&client, &authorization).await?;
+    eprintln!("Grok Build login complete.");
+    Ok(())
+}
+
+fn maybe_persist_default_provider_after_login(
+    provider: LoginProviderDescriptor,
+    options: &LoginOptions,
+) {
+    let cfg = crate::config::Config::load();
+    if cfg.provider.default_provider.is_some() {
+        return;
+    }
+
+    let provider_id =
+        crate::provider::MultiProvider::config_default_provider_for_login_provider(provider);
+    let Some(provider_id) = provider_id else {
+        return;
+    };
+
+    let suggested_model = match provider.target {
+        LoginProviderTarget::OpenAiCompatible(profile) => options
+            .openai_compatible_default_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| resolve_openai_compatible_profile(profile).default_model),
+        _ => None,
+    };
+
+    let model_to_save = cfg
+        .provider
+        .default_model
+        .as_deref()
+        .or(suggested_model.as_deref());
+
+    if let Err(err) = crate::config::Config::set_default_model(model_to_save, Some(provider_id)) {
+        crate::logging::warn(&format!(
+            "Failed to save {} as the default provider after login: {}",
+            provider_id, err
+        ));
+    }
+}
+
+/// Best-effort: tell a running jcode server that on-disk auth has changed so it
+/// can hot-initialize any newly-configured providers. No-op if no server is running.
+async fn notify_running_server_auth_changed_best_effort(provider: Option<&str>) {
+    let Ok(mut client) = crate::server::Client::connect().await else {
+        crate::logging::auth_event(
+            "auth_changed_notify_skipped",
+            "server",
+            &[("reason", "no_running_server")],
+        );
+        return;
+    };
+    match client.notify_auth_changed_for_provider(provider).await {
+        Ok(_) => crate::logging::auth_event("auth_changed_notify_sent", "server", &[]),
+        Err(err) => {
+            let reason = err.to_string();
+            crate::logging::auth_event(
+                "auth_changed_notify_failed",
+                "server",
+                &[("reason", reason.as_str())],
+            );
+        }
+    }
+}
+
+async fn login_jcode_flow(no_browser: bool) -> Result<()> {
+    eprintln!("Starting jcode subscription sign-in...");
+    let _ = jcode_device::login_jcode_device_flow(no_browser).await?;
+    Ok(())
+}
+
+pub(crate) async fn run_jcode_account_login(no_browser: bool) -> Result<()> {
+    login_jcode_flow(no_browser).await
+}
+
+fn login_openai_api_key_flow() -> Result<()> {
+    eprintln!("Setting up OpenAI API key...");
+    eprintln!("Get your API key from: https://platform.openai.com/api-keys\n");
+    eprint!("Paste your OpenAI API key: ");
     io::stdout().flush()?;
 
     let key = read_secret_line()?;
     if key.is_empty() {
         anyhow::bail!("No API key provided.");
     }
-
-    eprint!("Optional router base URL (press Enter to use the default placeholder): ");
-    io::stdout().flush()?;
-    let api_base = read_secret_line()?;
-
-    let mut content = format!(
-        "{}={}\n",
-        crate::subscription_catalog::JCODE_API_KEY_ENV,
-        key
-    );
-    if !api_base.trim().is_empty() {
-        content.push_str(&format!(
-            "{}={}\n",
-            crate::subscription_catalog::JCODE_API_BASE_ENV,
-            api_base.trim()
-        ));
+    if !key.starts_with("sk-") {
+        eprintln!("Warning: OpenAI API keys usually start with 'sk-'. Saving anyway.");
     }
 
-    let config_dir = crate::storage::app_config_dir()?;
-    let file_path = config_dir.join(crate::subscription_catalog::JCODE_ENV_FILE);
-    crate::storage::write_text_secret(&file_path, &content)?;
-
-    crate::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, key);
-    if !api_base.trim().is_empty() {
-        crate::env::set_var(
-            crate::subscription_catalog::JCODE_API_BASE_ENV,
-            api_base.trim(),
-        );
-    }
-
-    eprintln!("\nSuccessfully saved Jcode subscription credentials!");
+    save_named_api_key("openai.env", "OPENAI_API_KEY", &key)?;
+    eprintln!("\nSuccessfully saved OpenAI API key!");
     eprintln!(
-        "Stored at ~/.config/jcode/{}",
-        crate::subscription_catalog::JCODE_ENV_FILE
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join("openai.env")
+            .display()
     );
-    eprintln!(
-        "Curated models available now: {}",
-        crate::subscription_catalog::curated_models()
-            .iter()
-            .map(|model| model.display_name)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    crate::telemetry::record_auth_success("jcode", "api_key");
+    eprintln!("Provider: openai-api (native OpenAI Responses API)");
+    crate::telemetry::record_auth_success("openai-api", "api_key");
     Ok(())
 }
 
@@ -421,6 +634,35 @@ async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> R
         eprintln!("Profile email: {}", email);
     }
     crate::telemetry::record_auth_success("claude", "oauth");
+    Ok(())
+}
+
+fn login_anthropic_api_key_flow() -> Result<()> {
+    eprintln!("Setting up Anthropic API...");
+    eprintln!("Get your API key from: https://console.anthropic.com/settings/keys\n");
+    eprint!("Paste your Anthropic API key: ");
+    io::stdout().flush()?;
+
+    let key = read_secret_line()?;
+
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
+    }
+
+    if !key.starts_with("sk-ant-") {
+        eprintln!("Warning: Anthropic API keys typically start with 'sk-ant-'. Saving anyway.");
+    }
+
+    save_named_api_key("anthropic.env", "ANTHROPIC_API_KEY", &key)?;
+    eprintln!("\nSuccessfully saved Anthropic API key!");
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join("anthropic.env")
+            .display()
+    );
+    eprintln!("Provider: claude (native Anthropic Messages API)");
+    crate::telemetry::record_auth_success("anthropic-api", "api_key");
     Ok(())
 }
 
@@ -458,8 +700,58 @@ fn login_openrouter_flow() -> Result<()> {
 
     save_named_api_key("openrouter.env", "OPENROUTER_API_KEY", &key)?;
     eprintln!("\nSuccessfully saved OpenRouter API key!");
-    eprintln!("Stored at ~/.config/jcode/openrouter.env");
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join("openrouter.env")
+            .display()
+    );
     crate::telemetry::record_auth_success("openrouter", "api_key");
+    Ok(())
+}
+
+fn login_bedrock_flow() -> Result<()> {
+    eprintln!("Setting up AWS Bedrock...");
+    eprintln!(
+        "Generate a Bedrock API key in the AWS Bedrock console: https://console.aws.amazon.com/bedrock/home#/api-keys"
+    );
+    eprintln!("Short-term keys are recommended for onboarding/testing.\n");
+
+    let region = read_line_trimmed("AWS region [us-east-2]: ")?;
+    let region = if region.trim().is_empty() {
+        "us-east-2".to_string()
+    } else {
+        region.trim().to_string()
+    };
+
+    eprint!("Paste your Bedrock API key: ");
+    io::stdout().flush()?;
+    let key = read_secret_line()?;
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
+    }
+
+    save_named_api_key(
+        crate::provider::bedrock::ENV_FILE,
+        crate::provider::bedrock::API_KEY_ENV,
+        &key,
+    )?;
+    crate::provider_catalog::save_env_value_to_env_file(
+        crate::provider::bedrock::REGION_ENV,
+        crate::provider::bedrock::ENV_FILE,
+        Some(&region),
+    )?;
+
+    eprintln!("\nSuccessfully saved AWS Bedrock API key!");
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join(crate::provider::bedrock::ENV_FILE)
+            .display()
+    );
+    eprintln!("Region: {}", region);
+    eprintln!("Provider: bedrock (native AWS Bedrock Converse API)");
+    crate::telemetry::record_auth_success("bedrock", "api_key");
     Ok(())
 }
 
@@ -529,7 +821,12 @@ fn login_azure_flow() -> Result<()> {
     azure::apply_runtime_env()?;
 
     eprintln!("\nSuccessfully saved Azure OpenAI configuration!");
-    eprintln!("Stored at ~/.config/jcode/{}", azure::ENV_FILE);
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join(azure::ENV_FILE)
+            .display()
+    );
     eprintln!("Base URL: {}", azure::load_endpoint().unwrap_or_default());
     if let Some(model) = azure::load_model() {
         eprintln!("Default deployment/model: {}", model);
@@ -543,18 +840,36 @@ fn login_azure_flow() -> Result<()> {
     Ok(())
 }
 
-fn login_openai_compatible_flow(profile: &OpenAiCompatibleProfile) -> Result<()> {
+fn login_openai_compatible_flow(
+    profile: &OpenAiCompatibleProfile,
+    options: &LoginOptions,
+) -> Result<()> {
     let is_custom_profile = profile.id == crate::provider_catalog::OPENAI_COMPAT_PROFILE.id;
     let mut resolved = resolve_openai_compatible_profile(*profile);
 
     eprintln!("Setting up {}...", resolved.display_name);
-    eprintln!("See setup details: {}\n", resolved.setup_url);
+    let setup_url_depends_on_key = profile.id == crate::provider_catalog::MINIMAX_PROFILE.id;
+    if !setup_url_depends_on_key {
+        eprintln!("See setup details: {}\n", resolved.setup_url);
+    }
 
     if is_custom_profile {
+        if !io::stdin().is_terminal()
+            && options.openai_compatible_api_base.is_none()
+            && options.openai_compatible_api_key.is_none()
+        {
+            anyhow::bail!(
+                "Non-interactive OpenAI-compatible login requires --api-base and --api-key. \
+                 This avoids accidentally saving a piped model name or other answer as the API key."
+            );
+        }
         eprintln!(
             "You can point this at a hosted OpenAI-compatible API or a local server such as LM Studio or Ollama."
         );
-        let api_base_input = read_line_trimmed(&format!("API base URL [{}]: ", resolved.api_base))?;
+        let api_base_input = match options.openai_compatible_api_base.as_deref() {
+            Some(value) => value.trim().to_string(),
+            None => read_line_trimmed(&format!("API base URL [{}]: ", resolved.api_base))?,
+        };
         if !api_base_input.is_empty() {
             let normalized = crate::provider_catalog::normalize_api_base(&api_base_input)
                 .ok_or_else(|| {
@@ -569,18 +884,70 @@ fn login_openai_compatible_flow(profile: &OpenAiCompatibleProfile) -> Result<()>
             )?;
             resolved = resolve_openai_compatible_profile(*profile);
         }
+
+        if let Some(api_key_env) = options
+            .openai_compatible_api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if !crate::provider_catalog::is_safe_env_key_name(api_key_env) {
+                anyhow::bail!("Invalid API key environment variable name: {}", api_key_env);
+            }
+            crate::provider_catalog::save_env_value_to_env_file(
+                "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+                crate::provider_catalog::OPENAI_COMPAT_PROFILE.env_file,
+                Some(api_key_env),
+            )?;
+            resolved = resolve_openai_compatible_profile(*profile);
+        }
+
+        let default_model_input = match options.openai_compatible_default_model.as_deref() {
+            Some(value) => value.trim().to_string(),
+            None if !io::stdin().is_terminal() => String::new(),
+            None => read_line_trimmed("Default model name (optional, press Enter to skip): ")?,
+        };
+        if !default_model_input.is_empty() {
+            crate::provider_catalog::save_env_value_to_env_file(
+                "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+                crate::provider_catalog::OPENAI_COMPAT_PROFILE.env_file,
+                Some(&default_model_input),
+            )?;
+            resolved = resolve_openai_compatible_profile(*profile);
+        }
         eprintln!();
+    } else if let Some(model) = options
+        .openai_compatible_default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        resolved.default_model = Some(model.to_string());
     }
 
-    eprintln!("Endpoint: {}", resolved.api_base);
     let auth_method = if resolved.requires_api_key {
         eprintln!("API key env variable: {}\n", resolved.api_key_env);
-        eprint!("Paste your {} API key: ", resolved.display_name);
-        io::stdout().flush()?;
-
-        let key = read_secret_line()?;
+        if options.openai_compatible_api_key.is_none() {
+            existing_key_notice::announce_existing_api_key(&resolved);
+        }
+        let key = match options.openai_compatible_api_key.as_deref() {
+            Some(value) => value.trim().to_string(),
+            None => {
+                eprint!("Paste your {} API key: ", resolved.display_name);
+                io::stdout().flush()?;
+                read_secret_line()?
+            }
+        };
         if key.is_empty() {
             anyhow::bail!("No API key provided.");
+        }
+        resolved = crate::provider_catalog::resolve_openai_compatible_profile_with_api_key_hint(
+            *profile,
+            Some(&key),
+        );
+        eprintln!("Endpoint: {}", resolved.api_base);
+        if setup_url_depends_on_key {
+            eprintln!("See setup details: {}", resolved.setup_url);
         }
 
         crate::provider_catalog::save_env_value_to_env_file(
@@ -592,14 +959,22 @@ fn login_openai_compatible_flow(profile: &OpenAiCompatibleProfile) -> Result<()>
         eprintln!("\nSuccessfully saved {} API key!", resolved.display_name);
         "api_key"
     } else {
+        eprintln!("Endpoint: {}", resolved.api_base);
+        if setup_url_depends_on_key {
+            eprintln!("See setup details: {}", resolved.setup_url);
+        }
         eprintln!("This provider uses a local OpenAI-compatible endpoint.");
         eprintln!(
             "An API key is optional here. Press Enter to skip if your local server does not require one.\n"
         );
-        eprint!("Optional {} API key: ", resolved.display_name);
-        io::stdout().flush()?;
-
-        let key = read_secret_line()?;
+        let key = match options.openai_compatible_api_key.as_deref() {
+            Some(value) => value.trim().to_string(),
+            None => {
+                eprint!("Optional {} API key: ", resolved.display_name);
+                io::stdout().flush()?;
+                read_secret_line()?
+            }
+        };
         crate::provider_catalog::save_env_value_to_env_file(
             OPENAI_COMPAT_LOCAL_ENABLED_ENV,
             &resolved.env_file,
@@ -614,10 +989,10 @@ fn login_openai_compatible_flow(profile: &OpenAiCompatibleProfile) -> Result<()>
             eprintln!("\nSaved {} local endpoint setup.", resolved.display_name);
             "local_endpoint"
         } else {
-            crate::provider_catalog::save_env_value_to_env_file(
-                &resolved.api_key_env,
+            crate::provider_catalog::save_named_api_key(
                 &resolved.env_file,
-                Some(key.trim()),
+                &resolved.api_key_env,
+                key.trim(),
             )?;
             eprintln!(
                 "\nSaved {} local endpoint setup and optional API key.",
@@ -627,7 +1002,16 @@ fn login_openai_compatible_flow(profile: &OpenAiCompatibleProfile) -> Result<()>
         }
     };
 
-    eprintln!("Stored at ~/.config/jcode/{}", resolved.env_file);
+    if !resolved.requires_api_key && resolved.default_model.is_none() {
+        eprintln!("{}", next_step::local_endpoint_hint(&resolved.id));
+    }
+
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join(&resolved.env_file)
+            .display()
+    );
     if let Some(default_model) = resolved.default_model {
         eprintln!("Default model hint: {}", default_model);
     }
@@ -635,57 +1019,11 @@ fn login_openai_compatible_flow(profile: &OpenAiCompatibleProfile) -> Result<()>
     Ok(())
 }
 
-pub fn read_secret_line() -> Result<String> {
-    use crossterm::terminal;
+pub use jcode_terminal_prompt::read_secret_line;
 
-    let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
-    if !was_raw {
-        terminal::enable_raw_mode()?;
-    }
-
-    let mut input = String::new();
-    loop {
-        if let crossterm::event::Event::Key(key_event) =
-            crossterm::event::read().context("Failed to read key input")?
-        {
-            use crossterm::event::{KeyCode, KeyModifiers};
-            match key_event.code {
-                KeyCode::Enter => {
-                    eprintln!();
-                    break;
-                }
-                KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if !was_raw {
-                        terminal::disable_raw_mode()?;
-                    }
-                    anyhow::bail!("Cancelled.");
-                }
-                KeyCode::Backspace => {
-                    input.pop();
-                }
-                KeyCode::Char(c) => {
-                    input.push(c);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    if !was_raw {
-        terminal::disable_raw_mode()?;
-    }
-
-    Ok(input.trim().to_string())
-}
-
-fn read_line_trimmed(prompt: &str) -> Result<String> {
-    print!("{}", prompt);
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
+mod presenter;
+pub use presenter::install_terminal_login_presenter;
+use presenter::read_line_trimmed;
 
 fn save_named_env_vars(env_file: &str, vars: &[(&str, String)]) -> Result<()> {
     if !crate::provider_catalog::is_safe_env_file_name(env_file) {
@@ -710,35 +1048,14 @@ fn save_named_env_vars(env_file: &str, vars: &[(&str, String)]) -> Result<()> {
     std::fs::write(&file_path, &content)?;
     crate::platform::set_permissions_owner_only(&file_path)?;
 
-    for (key, value) in vars {
-        crate::env::set_var(key, value);
-    }
-
+    // File only: these assignments can include secrets (the Azure API key),
+    // and a process env copy would shadow later file edits and leak into
+    // child processes (#1386). Readers fall back to the env file.
     Ok(())
 }
 
 fn login_cursor_flow() -> Result<()> {
-    eprintln!("Starting Cursor login...");
-    let binary = crate::auth::cursor::cursor_agent_cli_path();
-
-    if crate::auth::cursor::has_cursor_agent_cli() {
-        match crate::auth::login_flows::run_external_login_command(&binary, &["login"]) {
-            Ok(()) => {
-                eprintln!("Cursor login command completed.");
-                crate::telemetry::record_auth_success("cursor", "oauth");
-                crate::auth::AuthStatus::invalidate_cache();
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("Cursor browser login failed: {}", err);
-                eprintln!();
-                eprintln!("Falling back to Cursor API key setup.");
-            }
-        }
-    } else {
-        eprintln!("Cursor Agent CLI was not found on PATH.");
-        eprintln!("You can still save a Cursor API key now and install Cursor Agent later.");
-    }
+    eprintln!("Starting Cursor API key setup...");
 
     eprintln!("Get your API key from: https://cursor.com/settings");
     eprintln!("(Dashboard > Integrations > User API Keys)\n");
@@ -753,63 +1070,14 @@ fn login_cursor_flow() -> Result<()> {
     save_named_api_key("cursor.env", "CURSOR_API_KEY", &key)?;
     crate::auth::AuthStatus::invalidate_cache();
     eprintln!("\nSuccessfully saved Cursor API key!");
-    eprintln!("Stored at ~/.config/jcode/cursor.env");
-    eprintln!("jcode will pass it to `cursor-agent` automatically.");
-    if !crate::auth::cursor::has_cursor_agent_cli() {
-        eprintln!("Install Cursor Agent to use the Cursor provider:");
-        eprintln!("  - macOS/Linux/WSL: curl https://cursor.com/install -fsS | bash");
-        eprintln!("  - Windows (PowerShell): irm 'https://cursor.com/install?win32=true' | iex");
-    }
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join("cursor.env")
+            .display()
+    );
+    eprintln!("jcode will use the native Cursor HTTPS transport.");
     crate::telemetry::record_auth_success("cursor", "api_key");
-    Ok(())
-}
-
-fn login_copilot_flow(no_browser: bool) -> Result<()> {
-    eprintln!("Starting GitHub Copilot login...");
-
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(login_copilot_device_flow(no_browser))
-    })
-}
-
-async fn login_copilot_device_flow(no_browser: bool) -> Result<()> {
-    let client = reqwest::Client::new();
-
-    let device_resp = crate::auth::copilot::initiate_device_flow(&client).await?;
-
-    eprintln!();
-    eprintln!("  Open this URL in your browser:");
-    eprintln!("    {}", device_resp.verification_uri);
-    eprintln!();
-    if let Some(qr) = crate::login_qr::indented_section(
-        &device_resp.verification_uri,
-        "  Or scan this QR on another device to open the verification page:",
-        "    ",
-    ) {
-        eprintln!("{qr}");
-        eprintln!();
-    }
-    eprintln!("  Enter code: {}", device_resp.user_code);
-    eprintln!();
-    eprintln!("  Waiting for authorization...");
-
-    maybe_open_browser(&device_resp.verification_uri, no_browser);
-
-    let token = crate::auth::copilot::poll_for_access_token(
-        &client,
-        &device_resp.device_code,
-        device_resp.interval,
-    )
-    .await?;
-
-    let username = crate::auth::copilot::fetch_github_username(&client, &token)
-        .await
-        .unwrap_or_else(|_| "unknown".to_string());
-
-    crate::auth::copilot::save_github_token(&token, &username)?;
-
-    eprintln!("  ✓ Authenticated as {} via GitHub Copilot", username);
-    crate::telemetry::record_auth_success("copilot", "oauth_device_code");
     Ok(())
 }
 
@@ -844,6 +1112,21 @@ async fn login_antigravity_flow(no_browser: bool) -> Result<()> {
 }
 
 async fn login_gemini_flow(no_browser: bool) -> Result<()> {
+    // Offer the auth-method choice only on an interactive terminal so scripted
+    // / piped invocations preserve the historical OAuth-only behavior.
+    if io::stdin().is_terminal() {
+        eprintln!("Gemini login. Choose an authentication method:");
+        eprintln!("  [1] Google account OAuth (free Code Assist tier, default)");
+        eprintln!(
+            "  [2] Gemini Developer API key (Google AI Studio, generativelanguage.googleapis.com)"
+        );
+        eprintln!();
+        let choice = read_line_trimmed("Enter 1-2 [1]: ")?;
+        if choice == "2" {
+            return login_gemini_api_key_flow();
+        }
+    }
+
     eprintln!("Starting native Gemini login...");
     eprintln!(
         "If your student/education plan is attached to your Google account, use that account in the browser flow."
@@ -870,242 +1153,29 @@ async fn login_gemini_flow(no_browser: bool) -> Result<()> {
     Ok(())
 }
 
-async fn login_google_flow(no_browser: bool) -> Result<()> {
-    use auth::google::{GmailAccessTier, GoogleCredentials};
-
-    eprintln!("╔══════════════════════════════════════════╗");
-    eprintln!("║       Gmail Integration Setup            ║");
-    eprintln!("╚══════════════════════════════════════════╝\n");
-
-    let _creds = match auth::google::load_credentials() {
-        Ok(creds) => {
-            eprintln!(
-                "✓ Google credentials found (client_id: {}...)\n",
-                &creds.client_id[..20.min(creds.client_id.len())]
-            );
-            creds
-        }
-        Err(_) => {
-            eprintln!("No Google credentials found. Let's set them up.\n");
-            eprintln!("You need OAuth credentials from Google Cloud Console.");
-            eprintln!("How would you like to provide them?\n");
-            eprintln!("  [1] Paste client ID and secret directly (easiest)");
-            eprintln!("  [2] Provide path to downloaded JSON credentials file");
-            eprintln!("  [3] I need help creating credentials (opens setup guide)\n");
-            eprint!("Choose [1/2/3]: ");
-            io::stdout().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-
-            match input.trim() {
-                "1" => {
-                    eprintln!("\nPaste your Google OAuth Client ID:");
-                    eprintln!("  (looks like: 123456789-abc.apps.googleusercontent.com)\n");
-                    eprint!("> ");
-                    io::stdout().flush()?;
-                    let mut client_id = String::new();
-                    io::stdin().read_line(&mut client_id)?;
-                    let client_id = client_id.trim().to_string();
-
-                    if client_id.is_empty() {
-                        anyhow::bail!("No client ID provided.");
-                    }
-
-                    eprintln!("\nPaste your Google OAuth Client Secret:");
-                    eprintln!("  (looks like: GOCSPX-...)\n");
-                    eprint!("> ");
-                    io::stdout().flush()?;
-                    let mut client_secret = String::new();
-                    io::stdin().read_line(&mut client_secret)?;
-                    let client_secret = client_secret.trim().to_string();
-
-                    if client_secret.is_empty() {
-                        anyhow::bail!("No client secret provided.");
-                    }
-
-                    let creds = GoogleCredentials {
-                        client_id,
-                        client_secret,
-                    };
-                    auth::google::save_credentials(&creds)?;
-                    eprintln!(
-                        "\n✓ Credentials saved to {}\n",
-                        auth::google::credentials_path()?.display()
-                    );
-                    creds
-                }
-                "2" => {
-                    eprintln!("\nPaste the path to your downloaded JSON file:\n");
-                    eprint!("> ");
-                    io::stdout().flush()?;
-                    let mut path_input = String::new();
-                    io::stdin().read_line(&mut path_input)?;
-                    let path_str = path_input.trim();
-
-                    let path_str = if let Some(stripped) = path_str.strip_prefix("~/") {
-                        if let Some(home) = dirs::home_dir() {
-                            home.join(stripped).to_string_lossy().to_string()
-                        } else {
-                            path_str.to_string()
-                        }
-                    } else {
-                        path_str.to_string()
-                    };
-
-                    let data = std::fs::read_to_string(&path_str)
-                        .with_context(|| format!("Could not read file: {}", path_str))?;
-
-                    let dest = auth::google::credentials_path()?;
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent)?;
-                        crate::platform::set_directory_permissions_owner_only(parent)?;
-                    }
-                    std::fs::write(&dest, &data)?;
-                    crate::platform::set_permissions_owner_only(&dest)?;
-
-                    let creds = auth::google::load_credentials()
-                        .context("Could not parse the credentials file. Make sure it's the OAuth client JSON from Google Cloud Console.")?;
-
-                    eprintln!("\n✓ Credentials imported to {}\n", dest.display());
-                    creds
-                }
-                "3" => {
-                    eprintln!("\n── Step-by-step Google Cloud setup ──\n");
-
-                    eprintln!("1. Open Google Cloud Console and create a project:");
-                    eprintln!("   Opening: https://console.cloud.google.com/projectcreate\n");
-                    maybe_open_browser(
-                        "https://console.cloud.google.com/projectcreate",
-                        no_browser,
-                    );
-                    eprint!("   Press Enter when your project is created...");
-                    io::stdout().flush()?;
-                    let mut wait = String::new();
-                    io::stdin().read_line(&mut wait)?;
-
-                    eprintln!("\n2. Enable the Gmail API:");
-                    eprintln!("   Opening: Gmail API library page\n");
-                    maybe_open_browser(
-                        "https://console.cloud.google.com/apis/library/gmail.googleapis.com",
-                        no_browser,
-                    );
-                    eprintln!("   Click the blue 'Enable' button.");
-                    eprint!("   Press Enter when done...");
-                    io::stdout().flush()?;
-                    io::stdin().read_line(&mut wait)?;
-
-                    eprintln!("\n3. Configure OAuth consent screen:");
-                    eprintln!("   Opening: OAuth consent screen\n");
-                    maybe_open_browser(
-                        "https://console.cloud.google.com/apis/credentials/consent",
-                        no_browser,
-                    );
-                    eprintln!("   - Choose 'External' user type");
-                    eprintln!("   - Fill in app name (e.g. 'jcode') and your email");
-                    eprintln!("   - Skip scopes (we'll request them during login)");
-                    eprintln!("   - Add your email as a test user");
-                    eprintln!("   - Save and continue through all steps");
-                    eprint!("   Press Enter when done...");
-                    io::stdout().flush()?;
-                    io::stdin().read_line(&mut wait)?;
-
-                    eprintln!("\n4. Create OAuth credentials:");
-                    eprintln!("   Opening: Credentials page\n");
-                    maybe_open_browser(
-                        "https://console.cloud.google.com/apis/credentials",
-                        no_browser,
-                    );
-                    eprintln!("   - Click '+ Create Credentials' > 'OAuth client ID'");
-                    eprintln!("   - Application type: 'Desktop app'");
-                    eprintln!("   - Name: 'jcode'");
-                    eprintln!("   - Click 'Create'\n");
-                    eprintln!("   A dialog will show your Client ID and Client Secret.\n");
-
-                    eprintln!("Paste your Client ID:");
-                    eprint!("> ");
-                    io::stdout().flush()?;
-                    let mut client_id = String::new();
-                    io::stdin().read_line(&mut client_id)?;
-                    let client_id = client_id.trim().to_string();
-
-                    if client_id.is_empty() {
-                        anyhow::bail!("No client ID provided.");
-                    }
-
-                    eprintln!("\nPaste your Client Secret:");
-                    eprint!("> ");
-                    io::stdout().flush()?;
-                    let mut client_secret = String::new();
-                    io::stdin().read_line(&mut client_secret)?;
-                    let client_secret = client_secret.trim().to_string();
-
-                    if client_secret.is_empty() {
-                        anyhow::bail!("No client secret provided.");
-                    }
-
-                    let creds = GoogleCredentials {
-                        client_id,
-                        client_secret,
-                    };
-                    auth::google::save_credentials(&creds)?;
-                    eprintln!("\n✓ Credentials saved!\n");
-                    creds
-                }
-                _ => {
-                    eprintln!("\nInvalid choice. Please enter 1, 2, or 3.\n");
-                    std::process::exit(1);
-                }
-            }
-        }
-    };
-
-    eprintln!("── Gmail Access Level ──\n");
-    eprintln!("  [1] Full Access (recommended)");
-    eprintln!("      Search, read, draft, send, and manage emails.");
-    eprintln!("      Send and delete always require your confirmation.\n");
-    eprintln!("  [2] Read & Draft Only");
-    eprintln!("      Search, read emails, create drafts. Cannot send or delete.");
-    eprintln!("      API-level restriction - impossible even if the AI tries.\n");
-    eprint!("Choose [1/2] (default: 1): ");
+fn login_gemini_api_key_flow() -> Result<()> {
+    eprintln!("Setting up Gemini Developer API key...");
+    eprintln!("Get your API key from: https://aistudio.google.com/apikey\n");
+    eprint!("Paste your Gemini API key: ");
     io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let tier = match input.trim() {
-        "" | "1" => GmailAccessTier::Full,
-        "2" => GmailAccessTier::ReadOnly,
-        _ => {
-            eprintln!("Invalid choice, defaulting to Full Access.");
-            GmailAccessTier::Full
-        }
-    };
-
-    eprintln!("\nAccess level: {}", tier.label());
-
-    eprintln!("\n── Logging in ──\n");
-
-    let tokens = auth::google::login(tier, no_browser).await?;
-
-    eprintln!("\n╔══════════════════════════════════════════╗");
-    eprintln!("║  ✓ Gmail setup complete!                 ║");
-    eprintln!("╚══════════════════════════════════════════╝\n");
-    if let Some(email) = &tokens.email {
-        eprintln!("  Account:      {}", email);
+    let key = read_secret_line()?;
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
     }
-    eprintln!("  Access tier:  {}", tokens.tier.label());
-    eprintln!(
-        "  Credentials:  {}",
-        auth::google::credentials_path()?.display()
-    );
-    eprintln!(
-        "  Tokens:       {}\n",
-        auth::google::tokens_path()?.display()
-    );
-    eprintln!("The 'gmail' tool is now available to the AI agent.");
-    eprintln!("Try asking: \"check my recent emails\" or \"search emails from ...\"");
 
-    crate::telemetry::record_auth_success("google", "oauth");
+    crate::auth::gemini::save_api_key(&key)?;
+    eprintln!("\nSuccessfully saved Gemini Developer API key!");
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join(crate::auth::gemini::GEMINI_API_KEY_ENV_FILE)
+            .display()
+    );
+    eprintln!(
+        "Provider: gemini (official Gemini Developer API, generativelanguage.googleapis.com)"
+    );
+    crate::telemetry::record_auth_success("gemini", "api_key");
     Ok(())
 }
 

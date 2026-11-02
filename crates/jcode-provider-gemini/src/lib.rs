@@ -1,10 +1,17 @@
 use anyhow::Result;
+use jcode_message_types::{ContentBlock, Message, Role, ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashSet;
 
-pub const DEFAULT_MODEL: &str = "gemini-2.5-pro";
+// Non-dated server-side alias: always resolves to the newest stable pro
+// model, so the default can never go stale or 404 into a downgrade chain
+// (2026-09-19: a transient NOT_FOUND on gemini-3.1-pro-preview silently
+// pinned every session to gemini-2.5-pro for days).
+pub const DEFAULT_MODEL: &str = "gemini-pro-latest";
 pub const AVAILABLE_MODELS: &[&str] = &[
+    "gemini-pro-latest",
+    "gemini-flash-latest",
     "gemini-3.1-pro-preview",
     "gemini-3-pro-preview",
     "gemini-3-flash-preview",
@@ -15,6 +22,7 @@ pub const AVAILABLE_MODELS: &[&str] = &[
     "gemini-1.5-flash",
 ];
 pub const FALLBACK_MODELS: &[&str] = &[
+    "gemini-pro-latest",
     "gemini-3.1-pro-preview",
     "gemini-3-pro-preview",
     "gemini-2.5-pro",
@@ -24,6 +32,10 @@ pub const FALLBACK_MODELS: &[&str] = &[
 ];
 pub const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 pub const CODE_ASSIST_API_VERSION: &str = "v1internal";
+/// Official Gemini Developer API (Google AI Studio) endpoint. Used when an API
+/// key is configured instead of OAuth Code Assist credentials.
+pub const GEMINI_API_ENDPOINT: &str = "https://generativelanguage.googleapis.com";
+pub const GEMINI_API_VERSION: &str = "v1beta";
 pub const USER_TIER_FREE: &str = "free-tier";
 pub const USER_TIER_LEGACY: &str = "legacy-tier";
 
@@ -149,7 +161,14 @@ pub struct VertexGenerateContentRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiContent {
+    // Requests always set `role` (see `build_contents`), but `generateContent`
+    // responses occasionally omit it on a candidate's `content` (observed on
+    // Antigravity/Cloud Code Gemini-3 turns). The response-side value is never
+    // read, so default it rather than failing the whole decode with
+    // "missing field `role`".
+    #[serde(default)]
     pub role: String,
+    #[serde(default)]
     pub parts: Vec<GeminiPart>,
 }
 
@@ -164,6 +183,11 @@ pub struct GeminiPart {
     pub function_call: Option<GeminiFunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_response: Option<GeminiFunctionResponse>,
+    /// Gemini 3 thought signature for this part. Must be replayed verbatim on
+    /// the `functionCall` part in later turns or the Cloud Code backend rejects
+    /// the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +212,264 @@ pub struct GeminiFunctionResponse {
     pub response: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+}
+
+pub fn build_system_instruction(system: &str) -> Option<GeminiContent> {
+    let trimmed = system.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(GeminiContent {
+            role: "user".to_string(),
+            parts: vec![GeminiPart {
+                text: Some(trimmed.to_string()),
+                ..Default::default()
+            }],
+        })
+    }
+}
+
+/// Prevention guidance appended to the Gemini system prompt when tools are
+/// advertised. Gemini-3 "thinking" models intermittently emit Python-style
+/// pseudo-code (e.g. `print(default_api.read(...))`) instead of a clean
+/// `functionCall`, which the backend rejects with `MALFORMED_FUNCTION_CALL` and
+/// empty content. Explicitly forbidding code/namespaces measurably reduces that
+/// failure mode at no latency cost (see the Gemini function-calling guidance and
+/// field reports of this exact behavior).
+const GEMINI_FUNCTION_CALL_GUARD: &str = "\n\n## Function calling\n\
+     - When you call a tool, emit a native function call, not code. Never write \
+     Python (or any language) that calls the tool, and never wrap a call in \
+     print(...) or a code block.\n\
+     - Use the function name exactly as defined. Do not prepend `default_api.` \
+     or any other namespace to the function name.";
+
+/// Build the Gemini `system_instruction`, appending [`GEMINI_FUNCTION_CALL_GUARD`]
+/// when tools are advertised so the model is steered away from the
+/// `MALFORMED_FUNCTION_CALL` pseudo-code failure mode.
+pub fn build_system_instruction_with_tool_guard(
+    system: &str,
+    has_tools: bool,
+) -> Option<GeminiContent> {
+    if !has_tools {
+        return build_system_instruction(system);
+    }
+    let mut combined = system.trim().to_string();
+    combined.push_str(GEMINI_FUNCTION_CALL_GUARD);
+    build_system_instruction(&combined)
+}
+
+pub fn build_contents(messages: &[Message]) -> Vec<GeminiContent> {
+    build_contents_with_signature_policy(messages, SignaturePolicy::ReplayCarriedForward)
+}
+
+/// How [`build_contents_with_signature_policy`] handles Gemini-3 function-call
+/// `thoughtSignature` replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignaturePolicy {
+    /// Normal path: replay each call's own signature, carrying the most recent
+    /// real signature forward onto calls that lack one.
+    ReplayCarriedForward,
+    /// Recovery path for a `missing a thought_signature` 400. The backend has
+    /// told us it will not accept this history's function-call parts, so
+    /// downgrade every tool call and tool result to plain text. This loses the
+    /// structured form but keeps the conversation's *content*, turning a hard
+    /// dead-end into a turn that completes.
+    DowngradeToolCallsToText,
+}
+
+/// Whether a provider error body is the Cloud Code / Antigravity backend
+/// rejecting a turn because its function calls lack a usable thought signature.
+pub fn is_missing_thought_signature_error(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("thought_signature") || lowered.contains("thoughtsignature")
+}
+
+pub fn build_contents_with_signature_policy(
+    messages: &[Message],
+    policy: SignaturePolicy,
+) -> Vec<GeminiContent> {
+    // Gemini-3 attaches an opaque `thoughtSignature` to function-call parts, and
+    // the Cloud Code / Antigravity backend rejects an assistant turn whose
+    // function calls are ALL unsigned with `Function call is missing a
+    // thought_signature in functionCall parts` (HTTP 400, issue #339). This
+    // happens because:
+    //   * a parallel multi-call turn only signs its FIRST call (siblings persist
+    //     unsigned), and
+    //   * locally synthesized tool calls (batch sub-calls, manual tool use,
+    //     auto-poke continuations, recovery) and pre-signature/imported sessions
+    //     carry no signature at all.
+    //
+    // Live-verified backend rule: a turn is accepted as long as *at least one*
+    // of its function calls carries a (valid) signature; a fully-unsigned turn
+    // 400s. All calls in a session share the same opaque reasoning channel and
+    // the backend accepts a previously-emitted signature replayed on later
+    // calls, so we carry the most recent real signature forward across the whole
+    // conversation onto any function call that lacks one. This keeps multi-call
+    // turns and synthesized/imported histories replayable instead of hard-failing.
+    let mut last_signature: Option<String> = None;
+    messages
+        .iter()
+        .filter_map(|message| {
+            let role = match message.role {
+                Role::User => "user",
+                Role::Assistant => "model",
+            };
+            let mut parts = Vec::new();
+            for block in &message.content {
+                match block {
+                    ContentBlock::Text { text, .. } => {
+                        parts.push(GeminiPart {
+                            text: Some(text.clone()),
+                            ..Default::default()
+                        });
+                    }
+                    ContentBlock::Reasoning { .. }
+                    | ContentBlock::ReasoningTrace { .. }
+                    | ContentBlock::AnthropicThinking { .. }
+                    | ContentBlock::OpenAIReasoning { .. } => {}
+                    ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        thought_signature,
+                    } => {
+                        if policy == SignaturePolicy::DowngradeToolCallsToText {
+                            // The backend rejected this history's function-call
+                            // parts. Preserve the call as readable text so the
+                            // model keeps its context instead of 400ing forever.
+                            parts.push(GeminiPart {
+                                text: Some(format!(
+                                    "[previous tool call] {name}({})",
+                                    ToolCall::input_as_object(input)
+                                )),
+                                ..Default::default()
+                            });
+                            continue;
+                        }
+                        let own_signature = thought_signature
+                            .as_ref()
+                            .filter(|sig| !sig.is_empty())
+                            .cloned();
+                        if own_signature.is_some() {
+                            last_signature = own_signature.clone();
+                        }
+                        let signature = own_signature.or_else(|| last_signature.clone());
+                        parts.push(GeminiPart {
+                            function_call: Some(GeminiFunctionCall {
+                                name: name.clone(),
+                                args: ToolCall::input_as_object(input),
+                                id: Some(id.clone()),
+                            }),
+                            thought_signature: signature,
+                            ..Default::default()
+                        });
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        if policy == SignaturePolicy::DowngradeToolCallsToText {
+                            // A `functionResponse` with no matching signed
+                            // `functionCall` is also rejected, so downgrade it too.
+                            let label = if is_error.unwrap_or(false) {
+                                "previous tool error"
+                            } else {
+                                "previous tool result"
+                            };
+                            parts.push(GeminiPart {
+                                text: Some(format!(
+                                    "[{label}] {}: {content}",
+                                    tool_name_from_tool_result(tool_use_id, messages)
+                                )),
+                                ..Default::default()
+                            });
+                            continue;
+                        }
+                        parts.push(GeminiPart {
+                            function_response: Some(GeminiFunctionResponse {
+                                name: tool_name_from_tool_result(tool_use_id, messages),
+                                response: if is_error.unwrap_or(false) {
+                                    json!({ "error": content })
+                                } else {
+                                    json!({ "content": content })
+                                },
+                                id: Some(tool_use_id.clone()),
+                            }),
+                            ..Default::default()
+                        });
+                    }
+                    ContentBlock::Image { media_type, data } => {
+                        parts.push(GeminiPart {
+                            inline_data: Some(InlineData {
+                                mime_type: media_type.clone(),
+                                data: data.clone(),
+                            }),
+                            ..Default::default()
+                        });
+                    }
+                    ContentBlock::OpenAICompaction { .. }
+                    | ContentBlock::ToolReference { .. }
+                    | ContentBlock::ProviderNative { .. } => {}
+                }
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(GeminiContent {
+                    role: role.to_string(),
+                    parts,
+                })
+            }
+        })
+        .collect()
+}
+
+fn tool_name_from_tool_result(tool_use_id: &str, messages: &[Message]) -> String {
+    for message in messages.iter().rev() {
+        for block in &message.content {
+            if let ContentBlock::ToolUse { id, name, .. } = block
+                && id == tool_use_id
+            {
+                return name.clone();
+            }
+        }
+    }
+    "tool".to_string()
+}
+
+pub fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<GeminiTool>> {
+    if tools.is_empty() {
+        return None;
+    }
+
+    Some(vec![GeminiTool {
+        function_declarations: tools
+            .iter()
+            .map(|tool| GeminiFunctionDeclaration {
+                name: tool.name.clone(),
+                // Prompt-visible. Approximate token cost for this field:
+                // tool.description_token_estimate().
+                description: tool.description.clone(),
+                parameters: gemini_compatible_schema(&tool.input_schema),
+            })
+            .collect(),
+    }])
+}
+
+/// Normalize a tool-parameter schema for Gemini `generateContent`, which
+/// accepts only an OpenAPI 3.0 subset and rejects the whole request with
+/// HTTP 400 ("Unknown name ... Cannot find field") over a single draft-style
+/// keyword anywhere in any tool.
+///
+/// The accepted subset, the recursion, and the structural rewrites (dangling
+/// `required` pruning for #655, `const` -> `enum`) all live in
+/// `jcode-schema-dialect` so that every provider shares one implementation and
+/// one set of regression tests. See that crate's docs for why this is an
+/// allow-list: a deny-list can only contain keywords that have already taken
+/// the provider down for somebody.
+pub fn gemini_compatible_schema(schema: &Value) -> Value {
+    jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::GEMINI)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -261,9 +543,32 @@ pub struct GeminiUsageMetadata {
     #[serde(default)]
     pub prompt_token_count: Option<u64>,
     #[serde(default)]
+    pub tool_use_prompt_token_count: Option<u64>,
+    #[serde(default)]
     pub candidates_token_count: Option<u64>,
     #[serde(default)]
+    pub thoughts_token_count: Option<u64>,
+    #[serde(default)]
     pub cached_content_token_count: Option<u64>,
+}
+
+impl GeminiUsageMetadata {
+    /// Tool-use prompts are input tokens, separate from the ordinary prompt.
+    pub fn input_token_count(&self) -> Option<u64> {
+        match (self.prompt_token_count, self.tool_use_prompt_token_count) {
+            (Some(prompt), Some(tool_use)) => Some(prompt.saturating_add(tool_use)),
+            (prompt, tool_use) => prompt.or(tool_use),
+        }
+    }
+
+    /// Billable output includes candidates and thinking tokens.
+    /// Do not infer output from totalTokenCount, which includes tool-use prompts.
+    pub fn output_token_count(&self) -> Option<u64> {
+        match (self.candidates_token_count, self.thoughts_token_count) {
+            (Some(candidates), Some(thoughts)) => Some(candidates.saturating_add(thoughts)),
+            (candidates, thoughts) => candidates.or(thoughts),
+        }
+    }
 }
 
 pub fn gemini_fallback_models(current_model: &str) -> Vec<&'static str> {
@@ -420,10 +725,115 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn response_usage_counts_tool_use_prompts_without_inventing_input() {
+        for (metadata, expected) in [
+            (json!({}), None),
+            (json!({"totalTokenCount": 99}), None),
+            (
+                json!({"promptTokenCount": null, "toolUsePromptTokenCount": null}),
+                None,
+            ),
+            (json!({"promptTokenCount": 0}), Some(0)),
+            (json!({"toolUsePromptTokenCount": 0}), Some(0)),
+            (json!({"promptTokenCount": 10}), Some(10)),
+            (json!({"toolUsePromptTokenCount": 90}), Some(90)),
+            (
+                json!({"promptTokenCount": 10, "toolUsePromptTokenCount": 90, "cachedContentTokenCount": 4}),
+                Some(100),
+            ),
+            (
+                json!({"promptTokenCount": u64::MAX, "toolUsePromptTokenCount": 1}),
+                Some(u64::MAX),
+            ),
+        ] {
+            let response: VertexGenerateContentResponse = serde_json::from_value(json!({
+                "usageMetadata": metadata
+            }))
+            .unwrap();
+            let usage = response.usage_metadata.unwrap();
+            assert_eq!(usage.input_token_count(), expected, "{metadata}");
+            assert_eq!(
+                usage.cached_content_token_count,
+                metadata["cachedContentTokenCount"].as_u64()
+            );
+        }
+    }
+
+    #[test]
+    fn response_usage_counts_thinking_without_inventing_output() {
+        for (metadata, expected) in [
+            (json!({"thoughtsTokenCount": 13}), Some(13)),
+            (
+                json!({"candidatesTokenCount": 7, "thoughtsTokenCount": 13}),
+                Some(20),
+            ),
+            (json!({"candidatesTokenCount": 7}), Some(7)),
+            (json!({}), None),
+            (
+                json!({"candidatesTokenCount": null, "thoughtsTokenCount": null}),
+                None,
+            ),
+            (json!({"thoughtsTokenCount": 0}), Some(0)),
+            (json!({"candidatesTokenCount": 0}), Some(0)),
+            (
+                json!({"candidatesTokenCount": 0, "thoughtsTokenCount": 0}),
+                Some(0),
+            ),
+            (
+                json!({"candidatesTokenCount": u64::MAX, "thoughtsTokenCount": 1}),
+                Some(u64::MAX),
+            ),
+            (
+                json!({"promptTokenCount": 10, "totalTokenCount": 100, "toolUsePromptTokenCount": 90}),
+                None,
+            ),
+            (
+                json!({"candidatesTokenCount": 7, "thoughtsTokenCount": 13, "totalTokenCount": 120, "toolUsePromptTokenCount": 90}),
+                Some(20),
+            ),
+        ] {
+            let response: VertexGenerateContentResponse = serde_json::from_value(json!({
+                "usageMetadata": metadata
+            }))
+            .unwrap();
+            assert_eq!(
+                response.usage_metadata.unwrap().output_token_count(),
+                expected,
+                "{metadata}"
+            );
+        }
+        let response: VertexGenerateContentResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(response.usage_metadata.is_none());
+    }
+
+    #[test]
+    fn compatible_schema_strips_nested_property_names() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "propertyNames": { "type": "string" },
+                    "additionalProperties": { "type": "string" }
+                }
+            }
+        });
+        let out = gemini_compatible_schema(&schema);
+        assert!(out["properties"]["data"].get("propertyNames").is_none());
+        // Existing Gemini normalization still drops additionalProperties.
+        assert!(
+            out["properties"]["data"]
+                .get("additionalProperties")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn fallback_models_skip_current_model() {
         assert_eq!(
             gemini_fallback_models("gemini-2.5-flash"),
             vec![
+                "gemini-pro-latest",
                 "gemini-3.1-pro-preview",
                 "gemini-3-pro-preview",
                 "gemini-2.5-pro",
@@ -455,5 +865,55 @@ mod tests {
                 "gemini-3-flash-preview".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn candidate_content_decodes_without_role() {
+        // Antigravity/Cloud Code Gemini-3 responses occasionally omit `role` on
+        // a candidate's `content` (and sometimes `parts` entirely). The whole
+        // generateContent decode used to fail with "missing field `role`",
+        // which aborted the turn; assert the response now decodes and the
+        // function call survives.
+        let raw = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "functionCall": {"name": "read", "args": {"file_path": "/tmp/x"}},
+                            "thoughtSignature": "SIG_XYZ"
+                        }]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }
+        })
+        .to_string();
+
+        let decoded: CodeAssistGenerateResponse =
+            serde_json::from_str(&raw).expect("decode response with role-less content");
+        let candidates = decoded.response.unwrap().candidates.unwrap();
+        let part = &candidates[0].content.as_ref().unwrap().parts[0];
+        assert_eq!(part.function_call.as_ref().unwrap().name, "read");
+        assert_eq!(part.thought_signature.as_deref(), Some("SIG_XYZ"));
+    }
+
+    #[test]
+    fn candidate_content_decodes_without_parts() {
+        // A bare `content: {}` (no `role`, no `parts`) must not abort the decode.
+        let raw = json!({
+            "response": {
+                "candidates": [{ "content": {}, "finishReason": "STOP" }]
+            }
+        })
+        .to_string();
+
+        let decoded: CodeAssistGenerateResponse =
+            serde_json::from_str(&raw).expect("decode response with empty content");
+        let content = decoded.response.unwrap().candidates.unwrap()[0]
+            .content
+            .clone()
+            .unwrap();
+        assert!(content.role.is_empty());
+        assert!(content.parts.is_empty());
     }
 }

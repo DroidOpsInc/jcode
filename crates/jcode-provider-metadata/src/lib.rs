@@ -26,11 +26,15 @@ pub enum LoginProviderTarget {
     AutoImport,
     Jcode,
     Claude,
+    ClaudeApiKey,
     OpenAi,
+    OpenAiApiKey,
     OpenRouter,
+    Bedrock,
     Azure,
     OpenAiCompatible(OpenAiCompatibleProfile),
     Cursor,
+    GrokBuild,
     Copilot,
     Gemini,
     Antigravity,
@@ -44,11 +48,13 @@ pub enum LoginProviderAuthStateKey {
     Anthropic,
     OpenAi,
     Azure,
+    Bedrock,
     OpenRouterLike,
     Copilot,
     Gemini,
     Antigravity,
     Cursor,
+    GrokBuild,
     Google,
 }
 
@@ -136,899 +142,15 @@ pub struct ResolvedOpenAiCompatibleProfile {
     pub requires_api_key: bool,
 }
 
-pub const OPENCODE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "opencode",
-    display_name: "OpenCode Zen",
-    api_base: "https://opencode.ai/zen/v1",
-    api_key_env: "OPENCODE_API_KEY",
-    env_file: "opencode.env",
-    setup_url: "https://opencode.ai/docs/providers#opencode-zen",
-    default_model: Some("qwen/qwen3-coder-plus"),
-    requires_api_key: true,
+mod catalog;
+mod muse;
+
+pub use catalog::*;
+use catalog::{LOGIN_PROVIDERS, OPENAI_COMPAT_PROFILES};
+pub use muse::{
+    META_MUSE_LOGIN_PROVIDER, META_MUSE_PROFILE, MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
+    MUSE_SUBSCRIPTION_PROFILE,
 };
-
-pub const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "opencode-go",
-    display_name: "OpenCode Go",
-    api_base: "https://opencode.ai/zen/go/v1",
-    api_key_env: "OPENCODE_GO_API_KEY",
-    env_file: "opencode-go.env",
-    setup_url: "https://opencode.ai/docs/providers#opencode-go",
-    default_model: Some("THUDM/GLM-4.5"),
-    requires_api_key: true,
-};
-
-pub const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "zai",
-    display_name: "Z.AI",
-    api_base: "https://api.z.ai/api/paas/v4",
-    api_key_env: "ZHIPU_API_KEY",
-    env_file: "zai.env",
-    setup_url: "https://docs.z.ai/guides/develop/openai/introduction",
-    default_model: Some("glm-4.5"),
-    requires_api_key: true,
-};
-
-pub const KIMI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "kimi",
-    display_name: "Kimi Code",
-    api_base: "https://api.kimi.com/coding/v1",
-    api_key_env: "KIMI_API_KEY",
-    env_file: "kimi.env",
-    setup_url: "https://www.kimi.com/coding/docs/en/more/third-party-agents.html",
-    default_model: Some("kimi-for-coding"),
-    requires_api_key: true,
-};
-
-pub const AI302_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "302ai",
-    display_name: "302.AI",
-    api_base: "https://api.302.ai/v1",
-    api_key_env: "302AI_API_KEY",
-    env_file: "302ai.env",
-    setup_url: "https://opencode.ai/docs/providers#302ai",
-    default_model: Some("qwen3-235b-a22b-instruct-2507"),
-    requires_api_key: true,
-};
-
-pub const BASETEN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "baseten",
-    display_name: "Baseten",
-    api_base: "https://inference.baseten.co/v1",
-    api_key_env: "BASETEN_API_KEY",
-    env_file: "baseten.env",
-    setup_url: "https://opencode.ai/docs/providers#baseten",
-    default_model: Some("zai-org/GLM-4.7"),
-    requires_api_key: true,
-};
-
-pub const CORTECS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "cortecs",
-    display_name: "Cortecs",
-    api_base: "https://api.cortecs.ai/v1",
-    api_key_env: "CORTECS_API_KEY",
-    env_file: "cortecs.env",
-    setup_url: "https://opencode.ai/docs/providers#cortecs",
-    default_model: Some("kimi-k2.5"),
-    requires_api_key: true,
-};
-
-pub const DEEPSEEK_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "deepseek",
-    display_name: "DeepSeek",
-    api_base: "https://api.deepseek.com",
-    api_key_env: "DEEPSEEK_API_KEY",
-    env_file: "deepseek.env",
-    setup_url: "https://opencode.ai/docs/providers#deepseek",
-    default_model: Some("deepseek-chat"),
-    requires_api_key: true,
-};
-
-pub const FIRMWARE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "firmware",
-    display_name: "Firmware",
-    api_base: "https://app.frogbot.ai/api/v1",
-    api_key_env: "FIRMWARE_API_KEY",
-    env_file: "firmware.env",
-    setup_url: "https://opencode.ai/docs/providers#firmware",
-    default_model: Some("kimi-k2.5"),
-    requires_api_key: true,
-};
-
-pub const HUGGING_FACE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "huggingface",
-    display_name: "Hugging Face",
-    api_base: "https://router.huggingface.co/v1",
-    api_key_env: "HF_TOKEN",
-    env_file: "huggingface.env",
-    setup_url: "https://opencode.ai/docs/providers#hugging-face",
-    default_model: Some("zai-org/GLM-4.7"),
-    requires_api_key: true,
-};
-
-pub const MOONSHOT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "moonshotai",
-    display_name: "Moonshot AI",
-    api_base: "https://api.moonshot.ai/v1",
-    api_key_env: "MOONSHOT_API_KEY",
-    env_file: "moonshotai.env",
-    setup_url: "https://opencode.ai/docs/providers#moonshot-ai",
-    default_model: Some("kimi-k2.5"),
-    requires_api_key: true,
-};
-
-pub const NEBIUS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "nebius",
-    display_name: "Nebius Token Factory",
-    api_base: "https://api.tokenfactory.nebius.com/v1",
-    api_key_env: "NEBIUS_API_KEY",
-    env_file: "nebius.env",
-    setup_url: "https://opencode.ai/docs/providers#nebius-token-factory",
-    default_model: Some("openai/gpt-oss-120b"),
-    requires_api_key: true,
-};
-
-pub const SCALEWAY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "scaleway",
-    display_name: "Scaleway",
-    api_base: "https://api.scaleway.ai/v1",
-    api_key_env: "SCALEWAY_API_KEY",
-    env_file: "scaleway.env",
-    setup_url: "https://opencode.ai/docs/providers#scaleway",
-    default_model: Some("qwen3-coder-30b-a3b-instruct"),
-    requires_api_key: true,
-};
-
-pub const STACKIT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "stackit",
-    display_name: "STACKIT",
-    api_base: "https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1",
-    api_key_env: "STACKIT_API_KEY",
-    env_file: "stackit.env",
-    setup_url: "https://opencode.ai/docs/providers#stackit",
-    default_model: Some("openai/gpt-oss-120b"),
-    requires_api_key: true,
-};
-
-pub const GROQ_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "groq",
-    display_name: "Groq",
-    api_base: "https://api.groq.com/openai/v1",
-    api_key_env: "GROQ_API_KEY",
-    env_file: "groq.env",
-    setup_url: "https://console.groq.com/docs/openai",
-    default_model: Some("llama-3.1-8b-instant"),
-    requires_api_key: true,
-};
-
-pub const MISTRAL_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "mistral",
-    display_name: "Mistral",
-    api_base: "https://api.mistral.ai/v1",
-    api_key_env: "MISTRAL_API_KEY",
-    env_file: "mistral.env",
-    setup_url: "https://docs.mistral.ai/getting-started/models/",
-    default_model: Some("devstral-medium-2507"),
-    requires_api_key: true,
-};
-
-pub const PERPLEXITY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "perplexity",
-    display_name: "Perplexity",
-    api_base: "https://api.perplexity.ai",
-    api_key_env: "PERPLEXITY_API_KEY",
-    env_file: "perplexity.env",
-    setup_url: "https://docs.perplexity.ai/docs/agent-api/openai-compatibility",
-    default_model: Some("sonar"),
-    requires_api_key: true,
-};
-
-pub const TOGETHER_AI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "togetherai",
-    display_name: "Together AI",
-    api_base: "https://api.together.xyz/v1",
-    api_key_env: "TOGETHER_API_KEY",
-    env_file: "togetherai.env",
-    setup_url: "https://docs.together.ai/docs/openai-api-compatibility",
-    default_model: Some("moonshotai/Kimi-K2-Instruct"),
-    requires_api_key: true,
-};
-
-pub const DEEPINFRA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "deepinfra",
-    display_name: "Deep Infra",
-    api_base: "https://api.deepinfra.com/v1/openai",
-    api_key_env: "DEEPINFRA_API_KEY",
-    env_file: "deepinfra.env",
-    setup_url: "https://deepinfra.com/docs/api-reference",
-    default_model: Some("moonshotai/Kimi-K2-Instruct"),
-    requires_api_key: true,
-};
-
-pub const FIREWORKS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "fireworks",
-    display_name: "Fireworks",
-    api_base: "https://api.fireworks.ai/inference/v1",
-    api_key_env: "FIREWORKS_API_KEY",
-    env_file: "fireworks.env",
-    setup_url: "https://docs.fireworks.ai/tools-sdks/openai-compatibility",
-    default_model: Some("accounts/fireworks/routers/kimi-k2p5-turbo"),
-    requires_api_key: true,
-};
-
-pub const MINIMAX_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "minimax",
-    display_name: "MiniMax",
-    api_base: "https://api.minimax.io/v1",
-    api_key_env: "MINIMAX_API_KEY",
-    env_file: "minimax.env",
-    setup_url: "https://platform.minimax.io/docs/api-reference/text-openai-api",
-    default_model: Some("MiniMax-M2.7"),
-    requires_api_key: true,
-};
-
-pub const XAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "xai",
-    display_name: "xAI",
-    api_base: "https://api.x.ai/v1",
-    api_key_env: "XAI_API_KEY",
-    env_file: "xai.env",
-    setup_url: "https://docs.x.ai/developers/quickstart",
-    default_model: Some("grok-code-fast-1"),
-    requires_api_key: true,
-};
-
-pub const LMSTUDIO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "lmstudio",
-    display_name: "LM Studio",
-    api_base: "http://localhost:1234/v1",
-    api_key_env: "LMSTUDIO_API_KEY",
-    env_file: "lmstudio.env",
-    setup_url: "https://lmstudio.ai/docs/app/api/endpoints/openai",
-    default_model: None,
-    requires_api_key: false,
-};
-
-pub const OLLAMA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "ollama",
-    display_name: "Ollama",
-    api_base: "http://localhost:11434/v1",
-    api_key_env: "OLLAMA_API_KEY",
-    env_file: "ollama.env",
-    setup_url: "https://ollama.com/blog/openai-compatibility",
-    default_model: None,
-    requires_api_key: false,
-};
-
-pub const CHUTES_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "chutes",
-    display_name: "Chutes",
-    api_base: "https://llm.chutes.ai/v1",
-    api_key_env: "CHUTES_API_KEY",
-    env_file: "chutes.env",
-    setup_url: "https://chutes.ai",
-    default_model: Some("Qwen/Qwen3-Coder-480B-A35B-Instruct"),
-    requires_api_key: true,
-};
-
-pub const CEREBRAS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "cerebras",
-    display_name: "Cerebras",
-    api_base: "https://api.cerebras.ai/v1",
-    api_key_env: "CEREBRAS_API_KEY",
-    env_file: "cerebras.env",
-    setup_url: "https://inference-docs.cerebras.ai/introduction",
-    default_model: Some("qwen-3-coder-480b"),
-    requires_api_key: true,
-};
-
-pub const ALIBABA_CODING_PLAN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "alibaba-coding-plan",
-    display_name: "Alibaba Cloud Coding Plan",
-    api_base: "https://coding.dashscope.aliyuncs.com/v1",
-    api_key_env: "BAILIAN_CODING_PLAN_API_KEY",
-    env_file: "alibaba-coding-plan.env",
-    setup_url: "https://www.alibabacloud.com/help/en/model-studio/coding-plan-quickstart",
-    default_model: Some("qwen3-coder-plus"),
-    requires_api_key: true,
-};
-
-pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "openai-compatible",
-    display_name: "OpenAI-compatible",
-    api_base: "https://api.openai.com/v1",
-    api_key_env: "OPENAI_COMPAT_API_KEY",
-    env_file: "openai-compatible.env",
-    setup_url: "https://opencode.ai/docs/providers#custom-providers",
-    default_model: None,
-    requires_api_key: true,
-};
-
-const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 28] = [
-    OPENCODE_PROFILE,
-    OPENCODE_GO_PROFILE,
-    ZAI_PROFILE,
-    KIMI_PROFILE,
-    CHUTES_PROFILE,
-    CEREBRAS_PROFILE,
-    ALIBABA_CODING_PLAN_PROFILE,
-    AI302_PROFILE,
-    BASETEN_PROFILE,
-    CORTECS_PROFILE,
-    DEEPSEEK_PROFILE,
-    FIRMWARE_PROFILE,
-    HUGGING_FACE_PROFILE,
-    MOONSHOT_PROFILE,
-    NEBIUS_PROFILE,
-    SCALEWAY_PROFILE,
-    STACKIT_PROFILE,
-    GROQ_PROFILE,
-    MISTRAL_PROFILE,
-    PERPLEXITY_PROFILE,
-    TOGETHER_AI_PROFILE,
-    DEEPINFRA_PROFILE,
-    FIREWORKS_PROFILE,
-    MINIMAX_PROFILE,
-    XAI_PROFILE,
-    LMSTUDIO_PROFILE,
-    OLLAMA_PROFILE,
-    OPENAI_COMPAT_PROFILE,
-];
-
-pub const CLAUDE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "claude",
-    display_name: "Anthropic/Claude",
-    auth_kind: LoginProviderAuthKind::OAuth,
-    auth_state_key: LoginProviderAuthStateKey::Anthropic,
-    auth_status_method: "OAuth / API key",
-    aliases: &["anthropic"],
-    menu_detail: "requires Claude Pro or Max subscription",
-    recommended: true,
-    target: LoginProviderTarget::Claude,
-    order: LoginProviderSurfaceOrder::new(Some(1), Some(1), Some(1), Some(1), Some(1)),
-};
-
-pub const AUTO_IMPORT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "auto-import",
-    display_name: "Auto Import",
-    auth_kind: LoginProviderAuthKind::Local,
-    auth_state_key: LoginProviderAuthStateKey::ExternalImport,
-    auth_status_method: "Reuse detected logins",
-    aliases: &["import", "reuse", "autoimport"],
-    menu_detail: "review and reuse logins from other tools",
-    recommended: false,
-    target: LoginProviderTarget::AutoImport,
-    order: LoginProviderSurfaceOrder::new(Some(1), Some(1), None, None, None),
-};
-
-pub const JCODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "jcode",
-    display_name: "Jcode Subscription",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::Jcode,
-    auth_status_method: "API key",
-    aliases: &["subscription", "jcode-subscription"],
-    menu_detail: "curated jcode subscription models",
-    recommended: false,
-    target: LoginProviderTarget::Jcode,
-    order: LoginProviderSurfaceOrder::new(Some(3), Some(3), Some(3), Some(3), Some(3)),
-};
-
-pub const OPENAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "openai",
-    display_name: "OpenAI",
-    auth_kind: LoginProviderAuthKind::OAuth,
-    auth_state_key: LoginProviderAuthStateKey::OpenAi,
-    auth_status_method: "OAuth / API key",
-    aliases: &[],
-    menu_detail: "requires ChatGPT Plus or Pro subscription",
-    recommended: true,
-    target: LoginProviderTarget::OpenAi,
-    order: LoginProviderSurfaceOrder::new(Some(2), Some(2), Some(2), Some(2), Some(2)),
-};
-
-pub const OPENROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "openrouter",
-    display_name: "OpenRouter",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key, pay-per-token, 200+ models",
-    recommended: false,
-    target: LoginProviderTarget::OpenRouter,
-    order: LoginProviderSurfaceOrder::new(Some(4), Some(3), Some(4), Some(3), Some(3)),
-};
-
-pub const AZURE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "azure",
-    display_name: "Azure OpenAI",
-    auth_kind: LoginProviderAuthKind::Hybrid,
-    auth_state_key: LoginProviderAuthStateKey::Azure,
-    auth_status_method: "Entra ID / API key",
-    aliases: &["azure-openai", "azure_openai", "aoai"],
-    menu_detail: "Microsoft Entra ID or Azure OpenAI API key",
-    recommended: false,
-    target: LoginProviderTarget::Azure,
-    order: LoginProviderSurfaceOrder::new(Some(5), None, None, None, Some(4)),
-};
-
-pub const OPENCODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "opencode",
-    display_name: "OpenCode Zen",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["opencode-zen", "zen"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(OPENCODE_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(5), Some(4), Some(5), Some(4), Some(4)),
-};
-
-pub const OPENCODE_GO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "opencode-go",
-    display_name: "OpenCode Go",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["opencodego"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(OPENCODE_GO_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(6), Some(5), Some(6), Some(5), Some(5)),
-};
-
-pub const ZAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "zai",
-    display_name: "Z.AI",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["z.ai", "z-ai", "zai-coding", "zhipu"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(ZAI_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(7), Some(6), Some(7), Some(6), Some(6)),
-};
-
-pub const KIMI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "kimi",
-    display_name: "Kimi Code",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[
-        "kimi-code",
-        "kimi-coding",
-        "kimi-coding-plan",
-        "kimi-for-coding",
-        "moonshot-coding",
-    ],
-    menu_detail: "API key, dedicated Kimi coding endpoint",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(KIMI_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(36), Some(36), Some(36), Some(36), Some(36)),
-};
-
-pub const CHUTES_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "chutes",
-    display_name: "Chutes",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(CHUTES_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(8), Some(7), Some(8), Some(7), Some(7)),
-};
-
-pub const CEREBRAS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "cerebras",
-    display_name: "Cerebras",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["cerebrascode", "cerberascode"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(CEREBRAS_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(9), Some(8), Some(9), Some(8), Some(8)),
-};
-
-pub const ALIBABA_CODING_PLAN_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "alibaba-coding-plan",
-    display_name: "Alibaba Cloud Coding Plan",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["bailian", "aliyun-bailian", "coding-plan", "alibaba-coding"],
-    menu_detail: "API key, dedicated Alibaba coding endpoint",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(ALIBABA_CODING_PLAN_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(10), Some(9), Some(10), Some(9), Some(9)),
-};
-
-pub const AI302_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "302ai",
-    display_name: "302.AI",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["302.ai"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(AI302_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(18), Some(18), Some(18), Some(18), Some(18)),
-};
-
-pub const BASETEN_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "baseten",
-    display_name: "Baseten",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(BASETEN_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(19), Some(19), Some(19), Some(19), Some(19)),
-};
-
-pub const CORTECS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "cortecs",
-    display_name: "Cortecs",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(CORTECS_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(20), Some(20), Some(20), Some(20), Some(20)),
-};
-
-pub const DEEPSEEK_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "deepseek",
-    display_name: "DeepSeek",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(DEEPSEEK_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(21), Some(21), Some(21), Some(21), Some(21)),
-};
-
-pub const FIRMWARE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "firmware",
-    display_name: "Firmware",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(FIRMWARE_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(22), Some(22), Some(22), Some(22), Some(22)),
-};
-
-pub const HUGGING_FACE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "huggingface",
-    display_name: "Hugging Face",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["hugging-face", "hf"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(HUGGING_FACE_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(23), Some(23), Some(23), Some(23), Some(23)),
-};
-
-pub const MOONSHOT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "moonshotai",
-    display_name: "Moonshot AI",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["moonshot"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(MOONSHOT_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(24), Some(24), Some(24), Some(24), Some(24)),
-};
-
-pub const NEBIUS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "nebius",
-    display_name: "Nebius Token Factory",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(NEBIUS_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(25), Some(25), Some(25), Some(25), Some(25)),
-};
-
-pub const SCALEWAY_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "scaleway",
-    display_name: "Scaleway",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(SCALEWAY_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(26), Some(26), Some(26), Some(26), Some(26)),
-};
-
-pub const STACKIT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "stackit",
-    display_name: "STACKIT",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(STACKIT_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(27), Some(27), Some(27), Some(27), Some(27)),
-};
-
-pub const GROQ_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "groq",
-    display_name: "Groq",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &[],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(GROQ_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(28), Some(28), Some(28), Some(28), Some(28)),
-};
-
-pub const MISTRAL_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "mistral",
-    display_name: "Mistral",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["mistralai"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(MISTRAL_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(29), Some(29), Some(29), Some(29), Some(29)),
-};
-
-pub const PERPLEXITY_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "perplexity",
-    display_name: "Perplexity",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["pplx"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(PERPLEXITY_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(30), Some(30), Some(30), Some(30), Some(30)),
-};
-
-pub const TOGETHER_AI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "togetherai",
-    display_name: "Together AI",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["together", "together-ai"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(TOGETHER_AI_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(31), Some(31), Some(31), Some(31), Some(31)),
-};
-
-pub const DEEPINFRA_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "deepinfra",
-    display_name: "Deep Infra",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["deep-infra"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(DEEPINFRA_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(32), Some(32), Some(32), Some(32), Some(32)),
-};
-
-pub const FIREWORKS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "fireworks",
-    display_name: "Fireworks",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["fireworks-ai", "fireworks.ai"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(FIREWORKS_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(37), Some(37), Some(37), Some(37), Some(37)),
-};
-
-pub const MINIMAX_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "minimax",
-    display_name: "MiniMax",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["minimaxi", "minimax-ai"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(MINIMAX_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
-};
-
-pub const XAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "xai",
-    display_name: "xAI",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["x.ai", "x-ai", "grok"],
-    menu_detail: "API key",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(XAI_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(33), Some(33), Some(33), Some(33), Some(33)),
-};
-
-pub const LMSTUDIO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "lmstudio",
-    display_name: "LM Studio",
-    auth_kind: LoginProviderAuthKind::Local,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "local endpoint",
-    aliases: &["lm-studio"],
-    menu_detail: "local OpenAI-compatible endpoint",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(LMSTUDIO_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(34), Some(34), Some(34), Some(34), Some(34)),
-};
-
-pub const OLLAMA_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "ollama",
-    display_name: "Ollama",
-    auth_kind: LoginProviderAuthKind::Local,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "local endpoint",
-    aliases: &[],
-    menu_detail: "local OpenAI-compatible endpoint",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(OLLAMA_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(35), Some(35), Some(35), Some(35), Some(35)),
-};
-
-pub const OPENAI_COMPAT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "openai-compatible",
-    display_name: "OpenAI-compatible",
-    auth_kind: LoginProviderAuthKind::Hybrid,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key / local endpoint",
-    aliases: &["openai_compatible", "compat", "custom"],
-    menu_detail: "custom hosted or local OpenAI-compatible endpoint",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(OPENAI_COMPAT_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(10), Some(9), None, None, Some(9)),
-};
-
-pub const CURSOR_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "cursor",
-    display_name: "Cursor",
-    auth_kind: LoginProviderAuthKind::Hybrid,
-    auth_state_key: LoginProviderAuthStateKey::Cursor,
-    auth_status_method: "API key / CLI",
-    aliases: &[],
-    menu_detail: "browser login or API key",
-    recommended: false,
-    target: LoginProviderTarget::Cursor,
-    order: LoginProviderSurfaceOrder::new(Some(11), Some(12), None, Some(9), Some(12)),
-};
-
-pub const COPILOT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "copilot",
-    display_name: "GitHub Copilot",
-    auth_kind: LoginProviderAuthKind::DeviceCode,
-    auth_state_key: LoginProviderAuthStateKey::Copilot,
-    auth_status_method: "device code",
-    aliases: &[],
-    menu_detail: "GitHub device flow",
-    recommended: false,
-    target: LoginProviderTarget::Copilot,
-    order: LoginProviderSurfaceOrder::new(Some(3), Some(10), Some(3), Some(10), Some(10)),
-};
-
-pub const GEMINI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "gemini",
-    display_name: "Google Gemini",
-    auth_kind: LoginProviderAuthKind::OAuth,
-    auth_state_key: LoginProviderAuthStateKey::Gemini,
-    auth_status_method: "OAuth",
-    aliases: &[],
-    menu_detail: "Google Gemini Code Assist OAuth login",
-    recommended: false,
-    target: LoginProviderTarget::Gemini,
-    order: LoginProviderSurfaceOrder::new(Some(13), Some(11), Some(4), Some(11), Some(13)),
-};
-
-pub const ANTIGRAVITY_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "antigravity",
-    display_name: "Antigravity",
-    auth_kind: LoginProviderAuthKind::OAuth,
-    auth_state_key: LoginProviderAuthStateKey::Antigravity,
-    auth_status_method: "OAuth",
-    aliases: &[],
-    menu_detail: "Google Antigravity OAuth login",
-    recommended: false,
-    target: LoginProviderTarget::Antigravity,
-    order: LoginProviderSurfaceOrder::new(Some(12), Some(12), None, Some(12), Some(12)),
-};
-
-pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "google",
-    display_name: "Google/Gmail",
-    auth_kind: LoginProviderAuthKind::OAuth,
-    auth_state_key: LoginProviderAuthStateKey::Google,
-    auth_status_method: "OAuth",
-    aliases: &["gmail"],
-    menu_detail: "read, draft, and send emails",
-    recommended: false,
-    target: LoginProviderTarget::Google,
-    order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
-};
-
-const LOGIN_PROVIDERS: [LoginProviderDescriptor; 39] = [
-    AUTO_IMPORT_LOGIN_PROVIDER,
-    CLAUDE_LOGIN_PROVIDER,
-    OPENAI_LOGIN_PROVIDER,
-    JCODE_LOGIN_PROVIDER,
-    OPENROUTER_LOGIN_PROVIDER,
-    AZURE_LOGIN_PROVIDER,
-    OPENCODE_LOGIN_PROVIDER,
-    OPENCODE_GO_LOGIN_PROVIDER,
-    ZAI_LOGIN_PROVIDER,
-    KIMI_LOGIN_PROVIDER,
-    CHUTES_LOGIN_PROVIDER,
-    CEREBRAS_LOGIN_PROVIDER,
-    ALIBABA_CODING_PLAN_LOGIN_PROVIDER,
-    AI302_LOGIN_PROVIDER,
-    BASETEN_LOGIN_PROVIDER,
-    CORTECS_LOGIN_PROVIDER,
-    DEEPSEEK_LOGIN_PROVIDER,
-    FIRMWARE_LOGIN_PROVIDER,
-    HUGGING_FACE_LOGIN_PROVIDER,
-    MOONSHOT_LOGIN_PROVIDER,
-    NEBIUS_LOGIN_PROVIDER,
-    SCALEWAY_LOGIN_PROVIDER,
-    STACKIT_LOGIN_PROVIDER,
-    GROQ_LOGIN_PROVIDER,
-    MISTRAL_LOGIN_PROVIDER,
-    PERPLEXITY_LOGIN_PROVIDER,
-    TOGETHER_AI_LOGIN_PROVIDER,
-    DEEPINFRA_LOGIN_PROVIDER,
-    FIREWORKS_LOGIN_PROVIDER,
-    MINIMAX_LOGIN_PROVIDER,
-    XAI_LOGIN_PROVIDER,
-    LMSTUDIO_LOGIN_PROVIDER,
-    OLLAMA_LOGIN_PROVIDER,
-    OPENAI_COMPAT_LOGIN_PROVIDER,
-    CURSOR_LOGIN_PROVIDER,
-    COPILOT_LOGIN_PROVIDER,
-    GEMINI_LOGIN_PROVIDER,
-    ANTIGRAVITY_LOGIN_PROVIDER,
-    GOOGLE_LOGIN_PROVIDER,
-];
 
 pub fn openai_compatible_profiles() -> &'static [OpenAiCompatibleProfile] {
     &OPENAI_COMPAT_PROFILES
@@ -1073,6 +195,24 @@ pub fn resolve_login_provider(input: &str) -> Option<LoginProviderDescriptor> {
     login_providers().iter().copied().find(|provider| {
         provider.id == normalized || provider.aliases.iter().any(|alias| *alias == normalized)
     })
+}
+
+/// Resolve a login provider by id, alias, or display name.
+///
+/// Login completion events carry the human-readable provider label (e.g.
+/// "Anthropic API") rather than the canonical id/alias, so the stricter
+/// [`resolve_login_provider`] (id/alias only) misses them. Auth-change routing
+/// needs to map those labels back to a provider id; matching the display name
+/// here keeps the post-login model refresh attributed to the correct provider.
+pub fn resolve_login_provider_loose(input: &str) -> Option<LoginProviderDescriptor> {
+    if let Some(provider) = resolve_login_provider(input) {
+        return Some(provider);
+    }
+    let normalized = normalize_provider_input(input)?;
+    login_providers()
+        .iter()
+        .copied()
+        .find(|provider| provider.display_name.to_ascii_lowercase() == normalized)
 }
 
 pub fn resolve_login_selection(
@@ -1138,14 +278,21 @@ fn allows_insecure_http_host(host: &str) -> bool {
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host);
-    if host.eq_ignore_ascii_case("localhost") {
+    let host_lower = host.to_ascii_lowercase();
+    if host_lower == "localhost" || host_lower.ends_with(".local") {
         return true;
     }
 
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return match ip {
             std::net::IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+                let raw = u32::from(v4);
+                let is_carrier_grade_nat = (raw & 0xffc0_0000) == 0x6440_0000;
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || is_carrier_grade_nat
             }
             std::net::IpAddr::V6(v6) => {
                 v6.is_loopback()
@@ -1191,6 +338,33 @@ mod tests {
     }
 
     #[test]
+    fn zai_login_identifies_coding_plan_subscription_key() {
+        let provider = resolve_login_provider("zai").expect("Z.AI provider");
+        assert_eq!(provider.auth_kind, LoginProviderAuthKind::ApiKey);
+        assert_eq!(provider.menu_detail, "Coding Plan subscription API key");
+
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("Z.AI must use its OpenAI-compatible Coding Plan endpoint");
+        };
+        assert_eq!(profile.api_base, "https://api.z.ai/api/coding/paas/v4");
+        assert_eq!(profile.setup_url, "https://docs.z.ai/devpack/quick-start");
+    }
+
+    #[test]
+    fn orcarouter_login_identifies_openai_compatible_endpoint() {
+        let provider = resolve_login_selection("orcarouter", &cli_login_providers())
+            .expect("OrcaRouter CLI login provider");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("OrcaRouter should use the OpenAI-compatible runtime");
+        };
+
+        assert_eq!(profile.id, "orcarouter");
+        assert_eq!(profile.api_base, "https://api.orcarouter.ai/v1");
+        assert_eq!(profile.api_key_env, "ORCAROUTER_API_KEY");
+        assert!(profile.requires_api_key);
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),
@@ -1199,6 +373,14 @@ mod tests {
         assert_eq!(
             normalize_api_base("http://10.0.0.8:11434/v1").as_deref(),
             Some("http://10.0.0.8:11434/v1")
+        );
+        assert_eq!(
+            normalize_api_base("http://100.103.78.84:11434/v1").as_deref(),
+            Some("http://100.103.78.84:11434/v1")
+        );
+        assert_eq!(
+            normalize_api_base("http://hsv.local:11434/v1").as_deref(),
+            Some("http://hsv.local:11434/v1")
         );
         assert_eq!(
             normalize_api_base("http://[fd00::1]:8080/v1").as_deref(),
@@ -1210,6 +392,239 @@ mod tests {
     fn normalize_api_base_rejects_public_http_hosts() {
         assert_eq!(normalize_api_base("http://example.com/v1"), None);
         assert_eq!(normalize_api_base("http://8.8.8.8/v1"), None);
+    }
+
+    #[test]
+    fn alibaba_coding_plan_uses_current_international_endpoint() {
+        assert_eq!(
+            ALIBABA_CODING_PLAN_PROFILE.api_base,
+            "https://coding-intl.dashscope.aliyuncs.com/v1"
+        );
+    }
+
+    #[test]
+    fn resolve_login_provider_loose_matches_id_alias_and_display_name() {
+        // id
+        assert_eq!(
+            resolve_login_provider_loose("anthropic-api").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // alias
+        assert_eq!(
+            resolve_login_provider_loose("claude-api").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // display name (the form LoginCompleted carries for API-key paste logins)
+        assert_eq!(
+            resolve_login_provider_loose("Anthropic API").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // display name is matched case-insensitively
+        assert_eq!(
+            resolve_login_provider_loose("anthropic api").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // unknown input stays unresolved
+        assert_eq!(resolve_login_provider_loose("not-a-provider"), None);
+    }
+
+    #[test]
+    fn resolve_login_provider_loose_resolves_every_descriptor_by_id_and_display_name() {
+        // Guards the LoginCompleted attribution path: the TUI publishes either a
+        // descriptor id (OAuth logins) or a display label (API-key paste logins),
+        // and both must resolve so the post-login auth-change refresh is
+        // attributed to the right provider instead of falling back to the
+        // session's active provider.
+        for descriptor in login_providers() {
+            assert_eq!(
+                resolve_login_provider_loose(descriptor.id).map(|d| d.id),
+                Some(descriptor.id),
+                "descriptor id {:?} should resolve",
+                descriptor.id
+            );
+            assert_eq!(
+                resolve_login_provider_loose(descriptor.display_name).map(|d| d.id),
+                Some(descriptor.id),
+                "display name {:?} (id {:?}) should resolve",
+                descriptor.display_name,
+                descriptor.id
+            );
+        }
+    }
+
+    #[test]
+    fn muse_subscription_login_is_device_code_without_stealing_muse_alias() {
+        let provider = resolve_login_provider("muse-subscription").expect("muse-subscription");
+        assert_eq!(provider, MUSE_SUBSCRIPTION_LOGIN_PROVIDER);
+        assert_eq!(provider.auth_kind, LoginProviderAuthKind::DeviceCode);
+        assert_eq!(provider.display_name, "Muse subscription (experimental)");
+        // The bare `muse` alias stays with pay-as-you-go meta-muse.
+        assert_eq!(
+            resolve_login_provider("muse").map(|provider| provider.id),
+            Some("meta-muse")
+        );
+        assert_eq!(
+            resolve_login_provider("muse-sub").map(|provider| provider.id),
+            Some("muse-subscription")
+        );
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("muse-subscription must share the OpenAiCompatible target");
+        };
+        assert_eq!(profile, MUSE_SUBSCRIPTION_PROFILE);
+        // Coordinator pins this exact tuple for credential resolution.
+        assert_eq!(profile.api_base, "https://api.meta.ai/v1");
+        assert_eq!(profile.api_key_env, "JCODE_MUSE_SUBSCRIPTION_API_KEY");
+        assert_eq!(profile.env_file, "muse-subscription.env");
+        // STANDARD default; contributor is never auto-selected.
+        assert_eq!(profile.default_model, Some("muse-spark-1.3"));
+        assert!(openai_compatible_profiles().contains(&MUSE_SUBSCRIPTION_PROFILE));
+        for providers in [
+            cli_login_providers(),
+            tui_login_providers(),
+            server_bootstrap_login_providers(),
+            auto_init_login_providers(),
+            auth_status_login_providers(),
+        ] {
+            assert_eq!(
+                resolve_login_selection("muse-subscription", &providers),
+                Some(MUSE_SUBSCRIPTION_LOGIN_PROVIDER)
+            );
+        }
+    }
+
+    #[test]
+    fn minimax_profile_uses_official_openai_compatible_configuration() {
+        assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimax.io/v1");
+        assert_eq!(MINIMAX_PROFILE.api_key_env, "MINIMAX_API_KEY");
+    }
+
+    #[test]
+    fn novita_profile_and_login_are_available_on_all_surfaces() {
+        assert_eq!(NOVITA_PROFILE.api_base, "https://api.novita.ai/openai");
+        assert_eq!(NOVITA_PROFILE.api_key_env, "NOVITA_API_KEY");
+        assert_eq!(NOVITA_PROFILE.env_file, "novita.env");
+        assert_eq!(NOVITA_PROFILE.default_model, Some("zai-org/glm-5.3"));
+        const { assert!(NOVITA_PROFILE.requires_api_key) };
+        assert!(openai_compatible_profiles().contains(&NOVITA_PROFILE));
+        for input in ["novita", "novita-ai", "novita.ai", " NOVITA "] {
+            assert_eq!(resolve_login_provider(input), Some(NOVITA_LOGIN_PROVIDER));
+        }
+        assert_eq!(
+            resolve_login_provider_loose("Novita AI"),
+            Some(NOVITA_LOGIN_PROVIDER)
+        );
+        assert_eq!(
+            NOVITA_LOGIN_PROVIDER.auth_kind,
+            LoginProviderAuthKind::ApiKey
+        );
+        assert_eq!(
+            NOVITA_LOGIN_PROVIDER.target,
+            LoginProviderTarget::OpenAiCompatible(NOVITA_PROFILE)
+        );
+        for providers in [
+            cli_login_providers(),
+            tui_login_providers(),
+            server_bootstrap_login_providers(),
+            auto_init_login_providers(),
+            auth_status_login_providers(),
+        ] {
+            assert_eq!(
+                resolve_login_selection("novita", &providers),
+                Some(NOVITA_LOGIN_PROVIDER)
+            );
+        }
+    }
+
+    #[test]
+    fn nvidia_nim_profile_uses_hosted_openai_compatible_configuration() {
+        assert_eq!(
+            NVIDIA_NIM_PROFILE.api_base,
+            "https://integrate.api.nvidia.com/v1"
+        );
+        assert_eq!(NVIDIA_NIM_PROFILE.api_key_env, "NVIDIA_API_KEY");
+        assert_eq!(NVIDIA_NIM_PROFILE.env_file, "nvidia-nim.env");
+        assert_eq!(
+            NVIDIA_NIM_PROFILE.default_model,
+            Some("nvidia/llama-3.1-nemotron-ultra-253b-v1")
+        );
+        assert!(matches!(
+            NVIDIA_NIM_LOGIN_PROVIDER.target,
+            LoginProviderTarget::OpenAiCompatible(profile) if profile.id == "nvidia-nim"
+        ));
+    }
+
+    #[test]
+    fn cerebras_profile_uses_official_openai_compatible_configuration() {
+        assert_eq!(CEREBRAS_PROFILE.id, "cerebras");
+        assert_eq!(CEREBRAS_PROFILE.display_name, "Cerebras");
+        assert_eq!(CEREBRAS_PROFILE.api_base, "https://api.cerebras.ai/v1");
+        assert_eq!(CEREBRAS_PROFILE.api_key_env, "CEREBRAS_API_KEY");
+        assert_eq!(CEREBRAS_PROFILE.env_file, "cerebras.env");
+        assert_eq!(
+            CEREBRAS_PROFILE.setup_url,
+            "https://inference-docs.cerebras.ai/introduction"
+        );
+        assert_eq!(CEREBRAS_PROFILE.default_model, Some("gpt-oss-120b"));
+        const { assert!(CEREBRAS_PROFILE.requires_api_key) };
+        assert_eq!(
+            CEREBRAS_LOGIN_PROVIDER.auth_kind,
+            LoginProviderAuthKind::ApiKey
+        );
+        assert_eq!(
+            CEREBRAS_LOGIN_PROVIDER.auth_state_key,
+            LoginProviderAuthStateKey::OpenRouterLike
+        );
+        assert!(matches!(
+            CEREBRAS_LOGIN_PROVIDER.target,
+            LoginProviderTarget::OpenAiCompatible(profile) if profile.id == "cerebras"
+        ));
+    }
+
+    #[test]
+    fn belvedir_profile_uses_official_inference_router_configuration() {
+        assert_eq!(BELVEDIR_PROFILE.id, "belvedir");
+        assert_eq!(BELVEDIR_PROFILE.display_name, "Belvedir");
+        assert_eq!(
+            BELVEDIR_PROFILE.api_base,
+            "https://platform.belvedir.ai/api/v1/route"
+        );
+        assert_eq!(BELVEDIR_PROFILE.api_key_env, "BELVEDIR_API_KEY");
+        assert_eq!(BELVEDIR_PROFILE.env_file, "belvedir.env");
+        assert_eq!(BELVEDIR_PROFILE.default_model, Some("auto"));
+        const { assert!(BELVEDIR_PROFILE.requires_api_key) };
+
+        let provider = resolve_login_provider("belvedir.ai").expect("Belvedir alias resolves");
+        assert_eq!(provider.id, "belvedir");
+        assert_eq!(
+            provider.target,
+            LoginProviderTarget::OpenAiCompatible(BELVEDIR_PROFILE)
+        );
+    }
+
+    #[test]
+    fn ollama_profile_is_local_openai_compatible_without_required_api_key() {
+        assert_eq!(OLLAMA_PROFILE.id, "ollama");
+        assert_eq!(OLLAMA_PROFILE.api_base, "http://localhost:11434/v1");
+        assert_eq!(OLLAMA_PROFILE.api_key_env, "OLLAMA_API_KEY");
+        assert_eq!(OLLAMA_PROFILE.env_file, "ollama.env");
+        assert_eq!(
+            OLLAMA_PROFILE.setup_url,
+            "https://docs.ollama.com/api/openai-compatibility"
+        );
+        assert_eq!(OLLAMA_PROFILE.default_model, None);
+        const {
+            assert!(!OLLAMA_PROFILE.requires_api_key);
+        }
+
+        assert_eq!(
+            OLLAMA_LOGIN_PROVIDER.auth_kind,
+            LoginProviderAuthKind::Local
+        );
+        assert_eq!(OLLAMA_LOGIN_PROVIDER.auth_status_method, "local endpoint");
+        assert!(matches!(
+            OLLAMA_LOGIN_PROVIDER.target,
+            LoginProviderTarget::OpenAiCompatible(profile) if profile.id == "ollama"
+        ));
     }
 
     #[test]
@@ -1338,9 +753,15 @@ mod tests {
             resolve_login_selection("2", &providers).map(|provider| provider.id),
             Some("claude")
         );
+        // `anthropic-api` sits at 3 (between claude and openai), shifting the
+        // rest of the list down one slot relative to the pre-May-2026 order.
         assert_eq!(
-            resolve_login_selection("15", &providers).map(|provider| provider.id),
-            Some("cursor")
+            resolve_login_selection("3", &providers).map(|provider| provider.id),
+            Some("anthropic-api")
+        );
+        assert_eq!(
+            resolve_login_selection("7", &providers).map(|provider| provider.id),
+            Some("bedrock")
         );
         assert_eq!(
             resolve_login_selection("compat", &providers).map(|provider| provider.id),
@@ -1356,29 +777,34 @@ mod tests {
             resolve_login_selection("1", &providers).map(|provider| provider.id),
             Some("auto-import")
         );
+        // `anthropic-api` at 3 shifted everything after it down one slot.
         assert_eq!(
-            resolve_login_selection("4", &providers).map(|provider| provider.id),
-            Some("jcode")
+            resolve_login_selection("3", &providers).map(|provider| provider.id),
+            Some("anthropic-api")
         );
         assert_eq!(
             resolve_login_selection("5", &providers).map(|provider| provider.id),
-            Some("copilot")
+            Some("jcode")
         );
         assert_eq!(
             resolve_login_selection("6", &providers).map(|provider| provider.id),
-            Some("openrouter")
+            Some("copilot")
         );
         assert_eq!(
             resolve_login_selection("7", &providers).map(|provider| provider.id),
+            Some("openrouter")
+        );
+        assert_eq!(
+            resolve_login_selection("8", &providers).map(|provider| provider.id),
+            Some("bedrock")
+        );
+        assert_eq!(
+            resolve_login_selection("9", &providers).map(|provider| provider.id),
             Some("azure")
         );
         assert_eq!(
-            resolve_login_selection("17", &providers).map(|provider| provider.id),
-            Some("gemini")
-        );
-        assert_eq!(
-            resolve_login_selection("18", &providers).map(|provider| provider.id),
-            Some("google")
+            resolve_login_selection("bedrock", &providers).map(|provider| provider.id),
+            Some("bedrock")
         );
     }
 }

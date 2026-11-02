@@ -95,10 +95,23 @@ if find scripts -type f -perm -0002 -print -quit | grep -q .; then
 fi
 
 echo "[3/3] Dependency advisories (cargo-audit)"
+audit_ignores=(
+  # Documented in docs/SECURITY_DEPENDENCIES.md. These are transitive
+  # advisories with tracked remediation paths; keep them visible in the triage
+  # doc while preventing unrelated CI/release work from being blocked.
+  --ignore RUSTSEC-2026-0141 # lettre via notify-email, Boring TLS backend not used by jcode
+  --ignore RUSTSEC-2026-0099 # rustls-webpki via rustls stack, awaiting upstream upgrade
+  --ignore RUSTSEC-2026-0104 # rustls-webpki via rustls stack, awaiting upstream upgrade
+  --ignore RUSTSEC-2026-0098 # rustls-webpki via rustls stack, awaiting upstream upgrade
+  --ignore RUSTSEC-2026-0049 # rustls-webpki via rustls stack, awaiting upstream upgrade
+  --ignore RUSTSEC-2026-0187 # lopdf via pdf-extract 0.8.2 (pins lopdf 0.34); PDF text extraction only, awaiting pdf-extract upgrade to lopdf >=0.42
+  --ignore RUSTSEC-2026-0194 # quick-xml via wayland-scanner (proc-macro); parses trusted Wayland protocol XML at build time only, never untrusted input at runtime
+  --ignore RUSTSEC-2026-0195 # quick-xml via wayland-scanner (proc-macro); same build-time-only exposure as RUSTSEC-2026-0194
+)
 if command -v cargo-audit >/dev/null 2>&1; then
-  cargo audit
+  cargo audit "${audit_ignores[@]}"
 elif cargo audit --version >/dev/null 2>&1; then
-  cargo audit
+  cargo audit "${audit_ignores[@]}"
 else
   if [[ "$strict" -eq 1 ]]; then
     die "cargo-audit is not installed (install with: cargo install cargo-audit --locked)"

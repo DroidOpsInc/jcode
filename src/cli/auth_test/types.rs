@@ -51,10 +51,10 @@ impl AuthTestTarget {
         !matches!(self, Self::Google)
     }
 
+    #[allow(deprecated)]
     fn from_provider_choice(choice: &super::provider_init::ProviderChoice) -> Option<Self> {
         match choice {
-            super::provider_init::ProviderChoice::Claude
-            | super::provider_init::ProviderChoice::ClaudeSubprocess => Some(Self::Claude),
+            super::provider_init::ProviderChoice::Claude => Some(Self::Claude),
             super::provider_init::ProviderChoice::Openai => Some(Self::Openai),
             super::provider_init::ProviderChoice::Gemini => Some(Self::Gemini),
             super::provider_init::ProviderChoice::Antigravity => Some(Self::Antigravity),
@@ -147,6 +147,9 @@ impl AuthTestTarget {
                     .join("cursor.env")
                     .display()
                     .to_string(),
+                crate::auth::cursor::cursor_auth_file_path()?
+                    .display()
+                    .to_string(),
                 crate::storage::user_home_path(".config/Cursor/User/globalStorage/state.vscdb")?
                     .display()
                     .to_string(),
@@ -170,6 +173,25 @@ struct AuthTestProviderReport {
     smoke_output: Option<String>,
     tool_smoke_output: Option<String>,
     success: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthTestContextModelReport {
+    model: String,
+    catalog_context_window: usize,
+    resolved_context_window: usize,
+    ok: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthTestContextAuditReport {
+    provider: String,
+    display_name: String,
+    checked_models: usize,
+    skipped_models_without_context: usize,
+    mismatches: Vec<AuthTestContextModelReport>,
+    success: bool,
+    detail: String,
 }
 
 impl AuthTestProviderReport {
@@ -214,7 +236,7 @@ impl ResolvedAuthTestTarget {
             Some(target) => Self::Detailed(target),
             None => Self::Generic {
                 provider,
-                choice: choice.clone(),
+                choice: *choice,
             },
         })
     }
@@ -256,7 +278,9 @@ impl AuthTestSmokeKind {
     fn success_detail(self) -> &'static str {
         match self {
             Self::Provider => "Provider returned AUTH_TEST_OK.",
-            Self::Tool => "Tool-enabled provider request returned AUTH_TEST_OK.",
+            Self::Tool => {
+                "Tool-enabled provider request returned AUTH_TEST_OK after one validated real Jcode bash tool call, successful registry execution, and tool-result followup."
+            }
         }
     }
 

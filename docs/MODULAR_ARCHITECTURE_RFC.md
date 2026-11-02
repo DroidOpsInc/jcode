@@ -7,7 +7,7 @@ This RFC describes a modular target architecture for jcode that matches the curr
 It is intentionally aligned with:
 
 - [`REFACTORING.md`](./REFACTORING.md)
-- [`COMPILE_PERFORMANCE_PLAN.md`](./COMPILE_PERFORMANCE_PLAN.md)
+- [`COMPILE_PERFORMANCE_PLAN.md`](./plans/COMPILE_PERFORMANCE_PLAN.md)
 - [`SERVER_ARCHITECTURE.md`](./SERVER_ARCHITECTURE.md)
 - [`MULTI_SESSION_CLIENT_ARCHITECTURE.md`](./MULTI_SESSION_CLIENT_ARCHITECTURE.md)
 
@@ -68,19 +68,16 @@ The current code organization is mixed:
 - **Workspace crates** already isolate several heavy or stable seams.
 - **Subdirectories under `src/`** increasingly reflect domain boundaries, especially for `agent`, `cli`, `server`, `tool`, and `tui`.
 
-Current workspace members from `Cargo.toml`:
+Current workspace members from `Cargo.toml` are grouped roughly as follows:
 
 - root package: `jcode`
-- `crates/jcode-agent-runtime`
-- `crates/jcode-embedding`
-- `crates/jcode-pdf`
-- `crates/jcode-azure-auth`
-- `crates/jcode-notify-email`
-- `crates/jcode-provider-metadata`
-- `crates/jcode-provider-core`
-- `crates/jcode-provider-openrouter`
-- `crates/jcode-provider-gemini`
-- `crates/jcode-tui-workspace`
+- foundation/runtime support: `jcode-agent-runtime`, `jcode-core`, `jcode-storage`, `jcode-terminal-launch`, `jcode-tool-core`
+- data-contract crates: `jcode-ambient-types`, `jcode-auth-types`, `jcode-background-types`, `jcode-batch-types`, `jcode-config-types`, `jcode-gateway-types`, `jcode-memory-types`, `jcode-message-types`, `jcode-selfdev-types`, `jcode-session-types`, `jcode-side-panel-types`, `jcode-task-types`, `jcode-tool-types`, `jcode-usage-types`
+- protocol and planning: `jcode-protocol`, `jcode-plan`
+- heavy or optional integrations: `jcode-embedding`, `jcode-pdf`, `jcode-notify-email`
+- auth and providers: `jcode-azure-auth`, `jcode-provider-core`, `jcode-provider-metadata`, `jcode-provider-openrouter`, `jcode-provider-gemini`
+- TUI extraction seams: `jcode-tui-core`, `jcode-tui-markdown`, `jcode-tui-mermaid`, `jcode-tui-render`, `jcode-tui-workspace`
+- product surfaces outside the main TUI binary: `jcode-desktop`
 
 ### What the root crate still owns
 
@@ -90,7 +87,7 @@ The root crate still directly owns most of the following concerns:
 - server orchestration and socket lifecycle
 - session state and persistence
 - agent turn execution and tool orchestration
-- provider traits and several provider implementations
+- provider implementation composition and runtime provider wiring; the shared `Provider` trait now lives in `jcode-provider-core`
 - protocol/message/config types
 - tool registry and many tool implementations
 - TUI application state and rendering
@@ -105,15 +102,40 @@ These splits already exist and should be treated as real architectural footholds
 | Crate | Current role |
 |---|---|
 | `jcode-agent-runtime` | shared interrupt and lightweight runtime primitives for agent execution |
+| `jcode-ambient-types` | usage and rate-limit records shared by ambient/background flows |
+| `jcode-auth-types` | provider-neutral auth state and credential metadata |
+| `jcode-background-types` | background-task status and progress DTOs |
+| `jcode-batch-types` | batch tool progress DTOs, currently depending only on message types internally |
+| `jcode-config-types` | stable configuration data contracts |
+| `jcode-core` | low-level utilities such as IDs, env helpers, fs helpers, stdin detection, and formatting |
+| `jcode-gateway-types` | gateway-facing data contracts |
+| `jcode-memory-types` | memory subsystem data contracts |
+| `jcode-message-types` | message content and transport-adjacent data contracts |
+| `jcode-protocol` | client/server protocol surface built from stable type crates and provider-core values |
+| `jcode-plan` | plan/task graph data model shared across coordination flows |
+| `jcode-selfdev-types` | self-development request/status data contracts |
+| `jcode-session-types` | session DTOs, currently depending only on message types internally |
+| `jcode-side-panel-types` | side-panel page and update data contracts |
+| `jcode-task-types` | task/tool scheduling data contracts |
+| `jcode-tool-core` | runtime tool contracts such as the `Tool` trait and execution context |
+| `jcode-tool-types` | stable tool output/image DTOs |
+| `jcode-usage-types` | usage accounting data contracts |
+| `jcode-storage` | storage helpers layered on `jcode-core` |
 | `jcode-embedding` | ONNX/tokenizer-based embedding implementation and heavy inference deps |
 | `jcode-pdf` | PDF text extraction |
 | `jcode-azure-auth` | Azure bearer token retrieval |
 | `jcode-notify-email` | SMTP/IMAP/mail transport |
 | `jcode-provider-metadata` | provider/login catalog and profile metadata |
-| `jcode-provider-core` | shared provider value types, route/cost types, shared HTTP client, schema helpers |
+| `jcode-provider-core` | shared provider contract (`Provider`/`EventStream`), value types, route/cost/model helpers, shared HTTP client, schema helpers |
 | `jcode-provider-openrouter` | OpenRouter-specific catalog/cache/support helpers |
 | `jcode-provider-gemini` | Gemini schema/model/support helpers |
+| `jcode-tui-core` | low-level terminal UI primitives that do not need full app state |
+| `jcode-tui-markdown` | markdown wrapping/rendering, layered on mermaid/workspace support |
+| `jcode-tui-mermaid` | mermaid parsing, rendering, caching, viewport, and widget support |
+| `jcode-tui-render` | reusable TUI layout/render helpers |
 | `jcode-tui-workspace` | workspace-map data/model/widget rendering |
+| `jcode-terminal-launch` | terminal process launch helpers |
+| `jcode-desktop` | desktop app surface and session/workspace rendering experiments |
 
 These are already aligned with the compile-performance plan's strategy: isolate heavy dependencies and stable helper surfaces first.
 
@@ -184,7 +206,7 @@ Broadly reused types like protocol structures, message forms, IDs, route metadat
 The existing workspace crates are good first splits, but they mostly isolate leaves. The center of gravity is still inside the root crate, especially around:
 
 - session state
-- provider trait and runtime behavior
+- provider runtime behavior and concrete provider composition
 - server lifecycle
 - tool registry wiring
 - TUI app state and reducers
@@ -270,6 +292,205 @@ flowchart TD
 ```
 
 The exact crate names can evolve, but the dependency direction should not.
+
+## Optimal compile-oriented workspace shape
+
+The optimal crate structure is not "one crate per folder". The target should optimize for three forces at the same time:
+
+1. **Invalidation boundaries:** high-churn edits should not rebuild unrelated stable subsystems.
+2. **Dependency weight boundaries:** heavy dependencies should sit behind leaf crates or opt-in features.
+3. **Ownership boundaries:** each crate should have one reason to change and a small public API.
+
+The current root-crate size distribution makes the main opportunity clear: `src/tui`, `src/server`, `src/tool`, `src/provider`, `src/cli`, and `src/auth` dominate root-crate lines. Splitting only tiny helpers is useful as a safe staging tactic, but the long-term win is moving these high-churn domains behind stable lower-layer contracts.
+
+### Desired final crate families
+
+#### 1. Contract/type crates
+
+These crates should be small, low-dependency, and slow-changing. They are allowed to be depended on broadly.
+
+Existing examples:
+
+- `jcode-message-types`
+- `jcode-tool-types`
+- `jcode-session-types`
+- `jcode-config-types`
+- `jcode-protocol`
+- `jcode-provider-core`
+- `jcode-plan`
+- `jcode-*-types`
+
+Target direction:
+
+- Keep these crates boring and DTO-heavy.
+- Prefer `serde`, `chrono`, and small utility dependencies only.
+- Avoid `tokio`, `reqwest`, `ratatui`, provider SDKs, storage paths, and product orchestration.
+- If a type requires a service handle, task runtime, channel sender, or filesystem layout, it is probably not a pure contract type.
+
+Compile-time reason:
+
+- These crates will be rebuilt whenever public contracts change, so they must change rarely.
+- They allow `server`, `tui`, `agent`, and `provider` crates to talk without depending on the root crate.
+
+#### 2. Domain/runtime crates
+
+These own product behavior but should depend only downward on contracts/support crates.
+
+Target crates:
+
+- `jcode-provider`: provider composition, provider routing, streaming contract adapters, and concrete runtime implementations layered on the `jcode-provider-core` trait.
+- `jcode-agent`: turn loop, compaction orchestration, provider/tool interaction, recovery logic.
+- `jcode-session`: session model, state transitions, persistence-facing session operations.
+- `jcode-server`: daemon lifecycle, client attachment, swarm/background coordination, service registries.
+- `jcode-tools` or narrower `jcode-tool-core` plus `jcode-tool-impl`: tool registry contracts and tool implementations.
+- `jcode-auth`: root auth orchestration after provider-neutral data lives in `jcode-auth-types` and heavy leaf SDKs stay separate.
+- `jcode-memory`: memory graph/log/search orchestration once its contracts are stable enough.
+
+Compile-time reason:
+
+- These are the main root invalidation hotspots.
+- They should become independent enough that an edit in TUI rendering does not rebuild provider implementations, and an edit in provider routing does not rebuild server socket lifecycle.
+
+#### 3. Interface/product crates
+
+These are high-churn application surfaces and should sit above runtime/domain crates.
+
+Target crates:
+
+- `jcode-cli`: parsing and command dispatch if CLI keeps growing.
+- `jcode-tui`: app state, reducers, key handling, command/input handling, UI orchestration.
+- `jcode-desktop`: already a separate surface.
+- `jcode-selfdev`: self-dev build/reload/customization workflows if they remain a substantial product surface.
+
+Compile-time reason:
+
+- UI and CLI are edited frequently. Their churn should not force recompilation of stable server/provider/session internals.
+- TUI should depend on protocol/service contracts, not on concrete server internals.
+
+#### 4. Heavy leaf adapter crates
+
+These should remain isolated and often feature-gated.
+
+Existing examples:
+
+- `jcode-embedding`
+- `jcode-pdf`
+- `jcode-azure-auth`
+- `jcode-notify-email`
+- `jcode-tui-mermaid`
+- provider support crates such as `jcode-provider-openrouter` and `jcode-provider-gemini`
+
+Target direction:
+
+- Keep heavy dependencies out of the root crate and out of broadly shared contracts.
+- Prefer opt-in features when the product can degrade gracefully.
+- Keep a thin root/domain facade when runtime integration still belongs at a higher layer.
+
+Compile-time reason:
+
+- Heavy crates are fine when cached, but terrible when dragged into unrelated rebuilds.
+- Feature-gated leaves make local inner loops cheaper without removing full-product builds.
+
+#### 5. Composition package
+
+The top-level `jcode` package should eventually become mostly:
+
+- binary entrypoints
+- feature defaults
+- runtime graph assembly
+- compatibility re-exports/facades during migration
+- product configuration and packaging defaults
+
+It should not be the long-term home of large implementation modules.
+
+### Recommended dependency direction
+
+A healthy final graph should look like this:
+
+```text
+jcode binary/composition
+  -> jcode-cli, jcode-tui, jcode-server, jcode-selfdev
+
+jcode-cli / jcode-tui
+  -> jcode-protocol, jcode-*-types, jcode-server-client contracts
+
+jcode-server
+  -> jcode-agent, jcode-session, jcode-provider, jcode-tools, jcode-storage
+
+jcode-agent
+  -> jcode-provider, jcode-tools, jcode-session, jcode-agent-runtime
+
+jcode-provider
+  -> jcode-provider-core, jcode-provider-* leaves, jcode-auth-types
+
+jcode-session
+  -> jcode-session-types, jcode-message-types, jcode-storage, optional leaf adapters
+
+contract/type crates
+  -> serde and small support crates only
+```
+
+The forbidden direction is just as important:
+
+- contract crates must not depend on runtime/domain crates
+- provider crates must not depend on TUI or server crates
+- TUI crates must not depend on concrete server internals when protocol/client contracts are sufficient
+- leaf adapter crates must not become backdoors into the root crate
+- the root crate should not be required by workspace peers except temporarily during migration
+
+### Split readiness checklist
+
+A root module is ready to become a crate when most of these are true:
+
+- Its public API can be described in less than a page.
+- It does not need to call back into arbitrary root modules.
+- Its dependencies are either lower-layer contracts or intentionally owned leaf adapters.
+- Tests can run at the crate level without booting the full product.
+- A touched-file benchmark shows it is on a meaningful invalidation path.
+- It has a stable facade in the root crate for compatibility during migration.
+
+If these are not true yet, keep decomposing internally first.
+
+### What not to do
+
+Avoid these tempting but harmful structures:
+
+- **One mega `jcode-common` crate.** It becomes the new root crate and invalidates everything.
+- **One crate per source directory.** This creates noisy APIs and dependency cycles without compile wins.
+- **Moving high-churn traits too early.** A poorly stabilized trait crate can become worse than the monolith.
+- **Moving UI-adjacent state into core.** This contaminates lower layers with `ratatui`/terminal concepts.
+- **Provider leaf crates depending on root.** That prevents the root from ever becoming a composition shell.
+- **Splitting by dependency weight only.** Heavy leaf isolation is good, but ownership and API stability matter too.
+
+### Highest-ROI next crate seams from the current tree
+
+Based on the current root size and existing footholds, the best next work is probably:
+
+1. **Provider contracts:** keep shrinking `src/provider/mod.rs` until a `jcode-provider` trait/runtime crate can depend only on `jcode-message-types`, `jcode-provider-core`, and small runtime primitives.
+2. **Server core:** extract protocol-independent pieces of `src/server/` such as client lifecycle state machines, swarm/background coordination DTOs, and reload/update policies behind server-local contracts.
+3. **TUI reducer/state core:** extract non-rendering app state transitions from `src/tui/app/*` before moving the whole TUI crate.
+4. **Tool contracts and registry shape:** separate tool definitions, schemas, execution context, and registry metadata from individual tool implementations.
+5. **Session domain:** isolate session state transitions and persistence-facing operations from server/TUI/provider orchestration.
+6. **Auth facade:** keep provider-neutral auth data in `jcode-auth-types`, heavy SDKs in leaf crates, and move root auth orchestration only after provider contracts stabilize.
+
+A useful near-term policy: every time a large root file is touched, ask whether some pure table, DTO, parser, reducer, classifier, or state transition can move downward into an existing support crate without pulling runtime dependencies with it.
+
+### Compile-time success metrics
+
+Each structural phase should record at least:
+
+- touched-file `cargo check` for the edited hotspot
+- touched-file selfdev build for the edited hotspot
+- `cargo tree -p jcode --edges normal --depth 1` before/after for dependency surprises
+- crate-level test coverage for newly extracted crates
+
+A split is successful if it either:
+
+- lowers warm touched-file times for common edits, or
+- prevents unrelated heavy crates from rebuilding when the root changes, or
+- makes the next larger extraction materially safer.
+
+A split should be reconsidered if it adds public API churn, creates cycles, or requires broad root re-exports that hide the actual dependency direction.
 
 ## Target crate responsibilities
 

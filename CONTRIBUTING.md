@@ -2,111 +2,73 @@
 
 Thanks for contributing.
 
-This repo moves quickly, so quality expectations must be explicit and enforceable.
+## Optional Nix development shell
 
-## Baseline workflow
+If you already use Nix, run `nix develop` from the repository root. The
+`flake.nix` provides Rust, Cargo, rustfmt, Clippy, rust-analyzer, the platform
+C/C++ compiler, CMake, Make, Perl, pkg-config, OpenSSL, Git, and ripgrep.
+On macOS it also supplies libclang through the bindgen hook for CoreAudio.
+It declares shells for x86_64 and aarch64 Linux and macOS. This is a development
+environment for the CLI repository, not Jcode Desktop or a Nix release package.
+The existing non-Nix setup remains supported.
 
-Before opening a PR, run the relevant checks for your change. At minimum:
+Enable `nix-command` and `flakes` in your Nix configuration, or use:
 
-```bash
-cargo fmt --all -- --check
-cargo check -q
-scripts/check_warning_budget.sh
-scripts/check_code_size_budget.py
-scripts/check_panic_budget.py
-scripts/check_swallowed_error_budget.py
+```sh
+nix --extra-experimental-features 'nix-command flakes' develop
 ```
 
-When you touch core orchestration, provider, server, or TUI code, run the stricter set too:
+Inside the shell, use the normal development workflow. If you have `justrust`
+installed, use `justrust check` and `justrust test`. The shell does not install
+justrust or configure its hosted service. The Nix-provided Cargo also works for
+contributors without justrust. Leave the shell with `exit`.
 
-```bash
-cargo check --all-targets --all-features
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-cargo test --test e2e
+`flake.lock` pins nixpkgs, including the Rust toolchain and native libraries.
+`Cargo.lock` still pins Rust crates. The shell does not replace your rustup
+installation or make builds hermetic: it retains your environment and may use
+externally installed tools. Optional integrations and runtime tools are not
+all bundled.
+
+To update the pinned environment deliberately:
+
+```sh
+nix flake update
+nix flake check --all-systems
+nix develop --command rustc --version
+nix develop --command pkg-config --modversion openssl
+nix develop --command justrust check
+# Without justrust: nix develop --command cargo check
 ```
 
-For larger refactors, use:
+Review and commit the resulting `flake.lock` change. Add new native build
+requirements to `flake.nix` when the project needs them. `flake check` evaluates
+the shells but does not compile Jcode or prove that every declared platform
+works, so test on the platforms you are changing as well.
 
-```bash
-scripts/refactor_phase1_verify.sh
-```
+## Issues vs pull requests
 
-## Code quality guardrails
+Both issues and pull requests are welcome. Open an issue to report a bug or discuss an idea, or send a focused PR if you have a fix or improvement ready. For large changes, discuss the approach in an issue first to avoid spending time on work that may not fit the project.
 
-### File size targets
+A clear issue or PR includes reproduction steps, expected behavior, actual behavior, and relevant logs, screenshots, or traces. Environment-specific fixes are especially helpful when they cover systems the maintainers may not have, such as macOS, Windows, unusual shells, terminal emulators, filesystems, GPU/display setups, or provider accounts.
 
-These are targets, not excuses to stop refactoring.
+Every PR must link to an existing GitHub issue in this repository. If there is no issue yet, open one and reference it in the PR description, for example with `Closes #123`.
 
-- No production Rust file should exceed **1200 LOC** without a documented reason.
-- Most production Rust files should stay below **800 LOC**.
-- Existing oversized files are under a ratcheting budget via `scripts/check_code_size_budget.py`.
-- If you intentionally shrink oversized files, update the baseline with:
+## Pull request policy
 
-```bash
-scripts/check_code_size_budget.py --update
-```
+Pull requests from everyone are welcome and encouraged, including first-time contributors and people who are not maintainers or existing contributors.
 
-Do **not** update the baseline to permit growth.
+PRs are reviewed as changes that can be merged directly, not merely as proposals or references for a maintainer-authored rewrite. Review is based on correctness, tests, security, architecture, maintainability, and fit with the project, not the author's contributor status.
 
-### Function size targets
+AI-assisted and generated contributions are welcome and held to the same standards as handwritten code. Understand the changes you submit, explain their assumptions and tradeoffs, and validate them. This applies equally to maintainer and community contributions.
 
-- Most functions should stay below **100 LOC**.
-- Functions larger than that should usually be split into helpers, reducers, or service methods.
-- If a function must stay large temporarily, leave it clearer than you found it and avoid making it larger.
+Maintainers may request revisions, help refine an implementation, or decline a change that does not fit the project. A rewrite is not required just because a PR comes from an outside contributor.
 
-### Warning policy
+The best PRs include:
 
-- Do not introduce new warnings.
-- The warning baseline is ratcheted downward via `scripts/check_warning_budget.sh`.
-- If your change removes warnings, update the baseline deliberately:
+- a clear description of the problem being solved
+- a minimal reproduction or failing test when possible
+- notes about edge cases and tradeoffs
+- focused changes that are easy to review independently
+- any relevant logs, screenshots, traces, or benchmarks
 
-```bash
-scripts/check_warning_budget.sh --update
-```
-
-Do **not** update the baseline to permit new warnings.
-
-### Lint policy
-
-- `cargo clippy --all-targets --all-features -- -D warnings` should stay green.
-- Prefer fixing lint findings over suppressing them.
-- Broad module-level suppressions are strongly discouraged.
-- If a suppression is truly necessary, make it narrow and document why.
-
-### Error handling policy
-
-- Production panic-prone usage must stay at zero via `scripts/check_panic_budget.py`.
-- Suspicious swallowed-error patterns are ratcheted via `scripts/check_swallowed_error_budget.py`.
-- Do not add new `let _ = ...`, `.ok()`, or `.unwrap_or_default()` in production code unless the error is intentionally best-effort and there is no clearer helper available.
-- Prefer propagating errors with context, or logging failures with enough context to debug the affected session/provider/path.
-
-### Refactor rules
-
-- Prefer behavior-preserving extraction before logic changes.
-- Avoid mixing unrelated cleanup with feature work unless the cleanup is required to make the change safe.
-- When you touch a large file, leave it smaller, clearer, or better-tested.
-- Delete dead code instead of carrying it forward.
-- Prefer typed enums/structs over new stringly-typed states.
-- Avoid silently ignoring important errors on persistence, protocol, or lifecycle paths.
-
-## Repository docs
-
-If you are working on quality or refactors, read:
-
-- `docs/REFACTORING.md`
-- `docs/CODE_QUALITY_10_10_PLAN.md`
-- `docs/CODE_QUALITY_TODO.md`
-- `docs/COMPILE_PERFORMANCE_PLAN.md`
-
-## CI expectations
-
-CI is expected to catch:
-
-- formatting regressions
-- all-target/all-feature compile regressions
-- clippy regressions
-- warning-budget regressions
-- oversized-file regressions
-
-If your change weakens a guardrail, treat that as a design change and document the reason clearly.
+Keep changes focused and split large changes into independently reviewable pieces when possible. Passing checks does not guarantee a merge, but author status or use of code generation is not, by itself, a reason to reject a contribution.

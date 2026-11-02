@@ -1,3 +1,6 @@
+pub mod request;
+pub mod stream;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,25 +41,60 @@ pub fn known_providers() -> Vec<String> {
     KNOWN_PROVIDERS.iter().map(|p| (*p).to_string()).collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
+    #[serde(default)]
     pub name: String,
     pub context_length: Option<u64>,
     #[serde(default)]
     pub pricing: ModelPricing,
     #[serde(default)]
     pub created: Option<u64>,
+    /// Declared input modalities, e.g. `["text", "image"]`. Empty when the
+    /// catalog did not say, in which case callers keep their existing default
+    /// rather than inferring a capability the source never claimed.
+    #[serde(default)]
+    pub input: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelPricing {
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_number")]
     pub prompt: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_number")]
     pub completion: Option<String>,
-    #[serde(default, rename = "input_cache_read")]
+    #[serde(
+        default,
+        rename = "input_cache_read",
+        deserialize_with = "deserialize_optional_string_or_number"
+    )]
     pub input_cache_read: Option<String>,
-    #[serde(default, rename = "input_cache_write")]
+    #[serde(
+        default,
+        rename = "input_cache_write",
+        deserialize_with = "deserialize_optional_string_or_number"
+    )]
     pub input_cache_write: Option<String>,
+}
+
+fn deserialize_optional_string_or_number<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(value)) => Some(value),
+        Some(serde_json::Value::Number(value)) => Some(value.to_string()),
+        Some(serde_json::Value::Null) | None => None,
+        Some(other) => {
+            return Err(serde::de::Error::custom(format!(
+                "expected string, number, or null for pricing value, got {other}"
+            )));
+        }
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,10 +136,33 @@ impl EndpointInfo {
         if let Some(ref prompt) = self.pricing.prompt
             && let Ok(p) = prompt.parse::<f64>()
         {
-            parts.push(format!("${:.2}/M", p * 1e6));
+            parts.push(format!("in ${:.2}/M", p * 1e6));
+        }
+        if let Some(ref completion) = self.pricing.completion
+            && let Ok(c) = completion.parse::<f64>()
+        {
+            parts.push(format!("out ${:.2}/M", c * 1e6));
+        }
+        if let Some(ref cache_write) = self.pricing.input_cache_write
+            && let Ok(cw) = cache_write.parse::<f64>()
+            && cw > 0.0
+        {
+            parts.push(format!("cache write ${:.2}/M", cw * 1e6));
+        }
+        if let Some(ref cache_read) = self.pricing.input_cache_read
+            && let Ok(cr) = cache_read.parse::<f64>()
+            && cr > 0.0
+        {
+            parts.push(format!("cache read ${:.2}/M", cr * 1e6));
         }
         if let Some(uptime) = self.uptime_last_30m {
             parts.push(format!("{:.0}%", uptime));
+        }
+        if let Some(ref latency) = self.latency_last_30m
+            && let Some(l) = Self::extract_p50(latency)
+            && l > 0.0
+        {
+            parts.push(format!("{:.0}ms p50", l));
         }
         if let Some(ref tps) = self.throughput_last_30m
             && let Some(t) = Self::extract_p50(tps)
@@ -109,11 +170,8 @@ impl EndpointInfo {
         {
             parts.push(format!("{:.0}tps", t));
         }
-        if let Some(ref cache_read) = self.pricing.input_cache_read
-            && let Ok(cr) = cache_read.parse::<f64>()
-            && cr > 0.0
-        {
-            parts.push("cache".to_string());
+        if let Some(cache) = self.supports_implicit_caching {
+            parts.push(if cache { "cache on" } else { "cache off" }.to_string());
         }
         if let Some(ref q) = self.quantization
             && q != "unknown"
@@ -127,6 +185,8 @@ impl EndpointInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskCache {
     pub cached_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_api_base: Option<String>,
     pub models: Vec<ModelInfo>,
 }
 
@@ -229,18 +289,18 @@ pub fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
     let trimmed = raw.trim();
     if let Some((model, provider)) = trimmed.rsplit_once('@') {
         let model = model.trim();
-        let mut provider = provider.trim();
+        let provider = provider.trim();
         if model.is_empty() {
             return (trimmed.to_string(), None);
         }
         if provider.is_empty() {
             return (model.to_string(), None);
         }
-        let mut allow_fallbacks = true;
-        if provider.ends_with('!') {
-            provider = provider.trim_end_matches('!').trim();
-            allow_fallbacks = false;
-        }
+        // An explicit provider is a hard routing constraint. Historically only
+        // the optional `!` suffix disabled fallbacks, which meant `@Novita`
+        // could silently run on another backend. Keep accepting `!` for
+        // backwards compatibility, but make every explicit pin strict.
+        let provider = provider.trim_end_matches('!').trim();
         if provider.is_empty() {
             return (model.to_string(), None);
         }
@@ -252,7 +312,7 @@ pub fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
             model.to_string(),
             Some(ParsedProvider {
                 name: provider,
-                allow_fallbacks,
+                allow_fallbacks: false,
             }),
         );
     }
@@ -267,12 +327,7 @@ pub fn current_unix_secs() -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-fn configured_cache_namespace() -> String {
-    let raw = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_CACHE_NAMESPACE.to_string());
+fn sanitize_cache_namespace(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -284,13 +339,33 @@ fn configured_cache_namespace() -> String {
     }
 }
 
-fn cache_path() -> PathBuf {
-    let namespace = configured_cache_namespace();
+fn configured_cache_namespace() -> String {
+    let raw = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_CACHE_NAMESPACE.to_string());
+
+    sanitize_cache_namespace(&raw)
+}
+
+fn cache_path_for_namespace(namespace: &str) -> PathBuf {
+    let namespace = sanitize_cache_namespace(namespace);
+    if let Ok(path) = std::env::var("JCODE_HOME") {
+        return PathBuf::from(path)
+            .join("cache")
+            .join(format!("{}_models.json", namespace));
+    }
+
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".jcode")
         .join("cache")
         .join(format!("{}_models.json", namespace))
+}
+
+fn cache_path() -> PathBuf {
+    cache_path_for_namespace(&configured_cache_namespace())
 }
 
 fn disk_cache_modified_at(path: &PathBuf) -> Option<SystemTime> {
@@ -307,8 +382,7 @@ fn fresh_disk_cache(cache: Option<DiskCache>) -> Option<DiskCache> {
     }
 }
 
-pub fn load_disk_cache_entry() -> Option<DiskCache> {
-    let path = cache_path();
+fn load_disk_cache_entry_from_path(path: PathBuf) -> Option<DiskCache> {
     let modified_at = disk_cache_modified_at(&path);
 
     if let Ok(memo) = DISK_CACHE_MEMO.lock()
@@ -333,6 +407,14 @@ pub fn load_disk_cache_entry() -> Option<DiskCache> {
     }
 
     fresh_disk_cache(loaded)
+}
+
+pub fn load_disk_cache_entry() -> Option<DiskCache> {
+    load_disk_cache_entry_from_path(cache_path())
+}
+
+pub fn load_disk_cache_entry_for_namespace(namespace: &str) -> Option<DiskCache> {
+    load_disk_cache_entry_from_path(cache_path_for_namespace(namespace))
 }
 
 pub fn load_disk_cache() -> Option<Vec<ModelInfo>> {
@@ -399,12 +481,51 @@ pub fn all_model_timestamps() -> Vec<(String, u64)> {
     load_disk_cache_entry()
         .into_iter()
         .flat_map(|cache| cache.models)
-        .filter_map(|m| m.created.map(|t| (m.id, t)))
+        .filter_map(|m| normalize_model_created_timestamp(m.created).map(|t| (m.id, t)))
         .collect()
 }
 
+fn normalize_model_created_timestamp(created: Option<u64>) -> Option<u64> {
+    let ts = created?;
+    // Model providers occasionally return malformed `created` values. Avoid
+    // rendering obviously bogus dates such as "Apr 1993" in the model picker.
+    const FIRST_PLAUSIBLE_MODEL_RELEASE_SECS: u64 = 1_577_836_800; // 2020-01-01
+    const ONE_YEAR_SECS: u64 = 365 * 24 * 60 * 60;
+    let now_plus_slack = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_add(ONE_YEAR_SECS))
+        .unwrap_or(u64::MAX);
+
+    (FIRST_PLAUSIBLE_MODEL_RELEASE_SECS..=now_plus_slack)
+        .contains(&ts)
+        .then_some(ts)
+}
+
 pub fn save_disk_cache(models: &[ModelInfo]) {
-    let path = cache_path();
+    save_disk_cache_with_source(models, None);
+}
+
+pub fn save_disk_cache_with_source(models: &[ModelInfo], source_api_base: Option<&str>) {
+    save_disk_cache_with_source_to_path(cache_path(), models, source_api_base);
+}
+
+pub fn save_disk_cache_with_source_for_namespace(
+    namespace: &str,
+    models: &[ModelInfo],
+    source_api_base: Option<&str>,
+) {
+    save_disk_cache_with_source_to_path(
+        cache_path_for_namespace(namespace),
+        models,
+        source_api_base,
+    );
+}
+
+fn save_disk_cache_with_source_to_path(
+    path: PathBuf,
+    models: &[ModelInfo],
+    source_api_base: Option<&str>,
+) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -416,6 +537,7 @@ pub fn save_disk_cache(models: &[ModelInfo]) {
 
     let cache = DiskCache {
         cached_at: now,
+        source_api_base: source_api_base.map(ToString::to_string),
         models: models.to_vec(),
     };
 
@@ -688,7 +810,7 @@ mod tests {
         assert_eq!(model, "anthropic/claude-sonnet-4");
         let provider = provider.expect("provider");
         assert_eq!(provider.name, "Fireworks");
-        assert!(provider.allow_fallbacks);
+        assert!(!provider.allow_fallbacks);
 
         let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks!");
         assert_eq!(model, "anthropic/claude-sonnet-4");
@@ -801,5 +923,15 @@ mod tests {
         assert!(detail.contains("14tps"));
         assert!(detail.contains("cache"));
         assert!(detail.contains("fp8"));
+    }
+
+    #[test]
+    fn normalize_model_created_timestamp_rejects_implausible_dates() {
+        assert_eq!(normalize_model_created_timestamp(Some(734_658_000)), None);
+        assert_eq!(normalize_model_created_timestamp(Some(1_577_836_799)), None);
+        assert_eq!(
+            normalize_model_created_timestamp(Some(1_735_689_600)),
+            Some(1_735_689_600)
+        );
     }
 }

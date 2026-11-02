@@ -12,12 +12,30 @@ fn generic_credential_paths_for_provider(
         crate::provider_catalog::LoginProviderTarget::OpenRouter => {
             vec![config_dir.join("openrouter.env")]
         }
+        crate::provider_catalog::LoginProviderTarget::OpenAiApiKey => {
+            vec![config_dir.join("openai.env")]
+        }
         crate::provider_catalog::LoginProviderTarget::Azure => {
             vec![config_dir.join(crate::auth::azure::ENV_FILE)]
         }
+        crate::provider_catalog::LoginProviderTarget::Bedrock => {
+            vec![config_dir.join(crate::provider::bedrock::ENV_FILE)]
+        }
         crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
-            let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-            vec![config_dir.join(resolved.env_file)]
+            // When a named config profile is active (selected via
+            // `--provider-profile`), its credentials come from the profile's
+            // configured `api_key_env`/`env_file`, not the built-in
+            // `openai-compatible.env`. Report that path so the audit is accurate
+            // (#402).
+            if let Some((_key_env, env_file)) =
+                crate::provider_catalog::active_named_provider_profile_credential_source()
+            {
+                vec![config_dir.join(env_file)]
+            } else {
+                let resolved =
+                    crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                vec![config_dir.join(resolved.env_file)]
+            }
         }
         _ => Vec::new(),
     }
@@ -34,20 +52,39 @@ fn auth_state_label(state: crate::auth::AuthState) -> &'static str {
     }
 }
 
+/// Name the probe target the way the user selected it.
+///
+/// Named profiles run on the generic openai-compatible runtime, so the builtin
+/// descriptor's display name describes the slot rather than the profile. Saying
+/// "openai-compatible" for a profile the user named explicitly is what made
+/// #712 so hard to diagnose.
+fn probe_display_name(provider: crate::provider_catalog::LoginProviderDescriptor) -> String {
+    if let Ok(profile) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        && !profile.trim().is_empty()
+        && provider.id == "openai-compatible"
+    {
+        return profile.trim().to_string();
+    }
+    provider.display_name.to_string()
+}
+
 fn probe_generic_provider_auth(
     provider: crate::provider_catalog::LoginProviderDescriptor,
     report: &mut AuthTestProviderReport,
 ) {
-    let status = crate::auth::AuthStatus::check();
-    let state = status.state_for_provider(provider);
-    let detail = status.method_detail_for_provider(provider);
+    // Keep generic provider probes provider-local. A DeepSeek/Z.AI/OpenRouter
+    // auth-test should never be delayed or wedged by an unrelated Cursor/Gemini
+    // external auth probe.
+    let status = crate::auth::AuthStatus::check_fast();
+    let assessment = status.assessment_for_provider(provider);
     report.push_step(
         "credential_probe",
-        state == crate::auth::AuthState::Available,
+        assessment.is_available(),
         format!(
-            "{} auth status is {} ({detail}).",
-            provider.display_name,
-            auth_state_label(state),
+            "{} auth status is {} ({}).",
+            probe_display_name(provider),
+            auth_state_label(assessment.state),
+            assessment.method_detail,
         ),
     );
     report.push_step(
@@ -122,6 +159,18 @@ async fn probe_openai_auth(report: &mut AuthTestProviderReport) {
 }
 
 async fn probe_gemini_auth(report: &mut AuthTestProviderReport) {
+    // Prefer the official Gemini Developer API key when configured: it is a
+    // static credential (no refresh handshake) pointed at
+    // generativelanguage.googleapis.com, so we only assert that it loads.
+    if crate::auth::gemini::uses_api_key() {
+        let detail = match crate::auth::gemini::api_key() {
+            Some(_) => "Loaded Gemini Developer API key (generativelanguage.googleapis.com).",
+            None => "Gemini Developer API key reported present but failed to load.",
+        };
+        report.push_step("credential_probe", true, detail);
+        return;
+    }
+
     if push_result_step(
         report,
         "credential_probe",
@@ -219,7 +268,7 @@ async fn probe_copilot_auth(report: &mut AuthTestProviderReport) {
             )
         },
     ) {
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
         push_result_step(
             report,
             "refresh_probe",
@@ -235,16 +284,16 @@ async fn probe_copilot_auth(report: &mut AuthTestProviderReport) {
 }
 
 async fn probe_cursor_auth(report: &mut AuthTestProviderReport) {
-    let has_agent_auth = crate::auth::cursor::has_cursor_agent_auth();
     let has_api_key = crate::auth::cursor::has_cursor_api_key();
+    let has_auth_file = crate::auth::cursor::has_cursor_auth_file_token();
     let has_vscdb = crate::auth::cursor::has_cursor_vscdb_token();
-    let ok = has_agent_auth || has_api_key || has_vscdb;
+    let ok = has_api_key || has_auth_file || has_vscdb;
     report.push_step(
         "credential_probe",
         ok,
         format!(
-            "Cursor auth sources: agent_session={}, api_key={}, vscdb_token={}",
-            has_agent_auth, has_api_key, has_vscdb
+            "Cursor native auth sources: api_key={}, auth_json={}, vscdb_token={}",
+            has_api_key, has_auth_file, has_vscdb
         ),
     );
     report.push_step(

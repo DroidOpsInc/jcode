@@ -17,6 +17,39 @@ scripts/onboarding_sandbox.sh fresh
 
 That gives you a clean jcode launch with isolated state.
 
+## Test with your REAL logins (import them in the sandbox)
+
+A clean sandbox is fully isolated, so the onboarding "import existing logins"
+step has nothing to import. To exercise the import + "continue where you left
+off" steps against your actual accounts, seed copies of your real credential and
+transcript files into the sandbox:
+
+```bash
+# Copy real external logins (Codex/Claude/Gemini/Copilot/Cursor/OpenCode/pi)
+scripts/onboarding_sandbox.sh seed-real-logins
+
+# Also copy your real Codex/Claude transcripts so the "continue a session"
+# step has real history to resume:
+scripts/onboarding_sandbox.sh seed-real-logins --with-transcripts
+
+# Or do it all in one shot: reset, seed, and launch jcode
+scripts/onboarding_sandbox.sh fresh-real --with-transcripts
+```
+
+How it works: when `JCODE_HOME` is set, jcode resolves every external credential
+and transcript lookup to `$JCODE_HOME/external/<same-relative-path-as-$HOME>`.
+`seed-real-logins` copies your real files there, so detection and import behave
+exactly as they would on a first-run machine that already has those tools
+installed. The copies are real tokens, so the sandbox stays local-only; your
+original `$HOME` files are never moved, rewritten, or deleted.
+
+Once seeded, just launch the sandbox and walk onboarding; it will detect and
+offer to import each real login:
+
+```bash
+scripts/onboarding_sandbox.sh jcode
+```
+
 ## Common commands
 
 ```bash
@@ -33,10 +66,70 @@ scripts/onboarding_sandbox.sh login openai
 scripts/onboarding_sandbox.sh login claude
 scripts/onboarding_sandbox.sh auth-status
 
+# Save the resulting logged-in sandbox as a reusable local fixture
+scripts/onboarding_sandbox.sh fixture-save normal-openai
+
+# Later, restore that exact auth state without repeating browser login
+scripts/onboarding_sandbox.sh fixture-load normal-openai
+scripts/onboarding_sandbox.sh auth-status
+
+# Or load and run one command in the fixture-backed sandbox
+scripts/onboarding_sandbox.sh fixture-run normal-openai -- auth-test --provider openai --no-smoke
+
 # Run arbitrary jcode commands in the sandbox
 scripts/onboarding_sandbox.sh jcode auth status
 scripts/onboarding_sandbox.sh jcode pair
 ```
+
+## Reusable local auth fixtures
+
+For repeated login testing, use local auth fixtures. A fixture is a copy of a
+sandbox `JCODE_HOME` after you have put it into an interesting state, for
+example a typical logged-in OpenAI user, an expired token state, or an external
+auth import approval state.
+
+The fixture store defaults to `.tmp/auth-fixtures`, which is intentionally local
+developer state. Fixtures may contain real OAuth tokens or API-key references, so
+do not commit or share them.
+
+Recommended workflow:
+
+```bash
+# One-time setup for a realistic logged-in state
+scripts/onboarding_sandbox.sh reset
+scripts/onboarding_sandbox.sh login openai
+scripts/onboarding_sandbox.sh auth-status
+scripts/onboarding_sandbox.sh fixture-save normal-openai
+
+# Fast repeat loop after that
+scripts/onboarding_sandbox.sh fixture-load normal-openai
+scripts/onboarding_sandbox.sh auth-status
+scripts/onboarding_sandbox.sh jcode auth-test --provider openai
+```
+
+The lower-level helper can also be used directly:
+
+```bash
+scripts/auth_fixture.sh list
+scripts/auth_fixture.sh save normal-openai
+scripts/auth_fixture.sh load normal-openai
+scripts/auth_fixture.sh run normal-openai -- auth status
+```
+
+Useful environment overrides:
+
+- `JCODE_ONBOARDING_SANDBOX`: select which sandbox receives the fixture.
+- `JCODE_ONBOARDING_DIR`: use an explicit sandbox directory.
+- `JCODE_AUTH_FIXTURE_DIR`: use a fixture store outside the repo, for example
+  `~/.local/share/jcode-auth-fixtures`.
+
+Suggested fixture names:
+
+- `normal-openai`
+- `normal-claude`
+- `expired-openai`
+- `api-key-openrouter`
+- `external-opencode-approved`
 
 ## Mobile onboarding simulator
 
@@ -61,6 +154,26 @@ Supported scenarios today:
 - `pairing_ready`
 - `connected_chat`
 
+## Headless screenshots
+
+Generate the successful import-logins onboarding sequence without launching a
+terminal or reading real credentials:
+
+```bash
+scripts/capture_onboarding.sh
+# Or choose an output directory:
+scripts/capture_onboarding.sh ~/onboarding-screenshots
+```
+
+The generator renders the same `OnboardingFlow` phases and ratatui widget tree
+used by the live application into an offscreen `TestBackend`. It writes SVG
+images and, when `rsvg-convert` is installed, matching PNG files. Every resting
+state in `onboarding_graph.rs` gets a render: the OpenAI login prompt, the
+detected-login summary (plus its choose-mode and telemetry sub-pages), the
+import progress card, the recovery and failure screens, the legacy continue
+prompt, and full-app frames for the start-choice picker, the new-session
+suggestions, and the accepted suggested-review turn.
+
 ## Why this is safer
 
 A fresh sandbox means:
@@ -69,6 +182,10 @@ A fresh sandbox means:
 - no real runtime sockets are reused
 - no previously trusted external auth sources are reused
 - you can blow it away with one `reset`
+
+When using fixtures, the sandbox is still isolated from your normal jcode state,
+but the loaded fixture may intentionally contain copied auth state from an earlier
+sandbox login.
 
 ## Recommended workflow
 

@@ -18,6 +18,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  JCODE_CI: "1"
+  # CI builds without the local parallel-frontend rustc wrapper from
+  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
+  CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
 
@@ -82,7 +86,10 @@ jobs:
             'build_shell_command_uses_cmd_and_executes_command',
             'pipe_name_is_stable_and_normalizes_case_and_separators',
             'pipe_name_falls_back_when_stem_is_empty',
-            'stream_pair_round_trips_bytes'
+            'busy_pipe_is_reported_as_a_live_socket_path',
+            'stream_pair_round_trips_bytes',
+            'split_stream_supports_concurrent_read_and_write',
+            'auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_blocking'
           )
 
           foreach ($testName in $tests) {
@@ -143,15 +150,8 @@ jobs:
       - name: Verify installer using local artifact
         shell: pwsh
         run: |
-          $cargoVersion = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-          if (-not $cargoVersion) {
-            throw 'Could not determine Cargo.toml version'
-          }
-
-          $version = 'v' + $cargoVersion.Matches[0].Groups[1].Value
           & ./.github/scripts/verify_windows_install.ps1 `
-            -ArtifactExePath 'target/x86_64-pc-windows-msvc/release/jcode.exe' `
-            -Version $version
+            -ArtifactExePath 'target/x86_64-pc-windows-msvc/release/jcode.exe'
 
   smoke-arm64:
     name: Windows Smoke (ARM64)
@@ -202,12 +202,5 @@ jobs:
       - name: Verify installer using local artifact
         shell: pwsh
         run: |
-          $cargoVersion = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-          if (-not $cargoVersion) {
-            throw 'Could not determine Cargo.toml version'
-          }
-
-          $version = 'v' + $cargoVersion.Matches[0].Groups[1].Value
           & ./.github/scripts/verify_windows_install.ps1 `
-            -ArtifactExePath 'target/aarch64-pc-windows-msvc/release/jcode.exe' `
-            -Version $version
+            -ArtifactExePath 'target/aarch64-pc-windows-msvc/release/jcode.exe'

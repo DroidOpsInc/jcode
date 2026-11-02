@@ -14,9 +14,14 @@ use std::fs;
 #[cfg(unix)]
 use std::path::Path;
 #[cfg(unix)]
+use std::sync::Mutex;
+#[cfg(unix)]
 use std::thread;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(unix)]
 struct EnvVarGuard {
@@ -83,6 +88,7 @@ fn wait_for_lines(path: &Path, min_lines: usize) -> Vec<String> {
 #[cfg(unix)]
 #[test]
 fn spawn_resume_in_new_terminal_uses_handterm_exec_mode() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
     let temp = tempfile::tempdir().expect("temp dir");
     let output_path = temp.path().join("resume-launch.txt");
     write_fake_handterm(&temp, &output_path);
@@ -103,14 +109,20 @@ fn spawn_resume_in_new_terminal_uses_handterm_exec_mode() {
     assert!(launched);
 
     let lines = wait_for_lines(&output_path, 5);
-    assert_eq!(lines[0], cwd.to_string_lossy());
-    assert_eq!(lines[1], "--standalone");
-    assert_eq!(lines[2], "--backend");
-    assert_eq!(lines[3], "gpu");
-    assert_eq!(lines[4], "--exec");
-    assert!(lines[5].contains("--resume"));
-    assert!(lines[5].contains("ses_test_123"));
-    assert!(lines[5].contains(exe.to_string_lossy().as_ref()));
+    // The fake terminal records the shell's physical cwd; on macOS the temp dir
+    // is reached through the /var -> /private/var symlink (#1153).
+    assert_eq!(
+        lines[0],
+        cwd.canonicalize()
+            .expect("canonicalize cwd")
+            .to_string_lossy()
+    );
+    assert_eq!(lines[1], "--backend");
+    assert_eq!(lines[2], "gpu");
+    assert_eq!(lines[3], "--exec");
+    assert!(lines[4].contains("--resume"));
+    assert!(lines[4].contains("ses_test_123"));
+    assert!(lines[4].contains(exe.to_string_lossy().as_ref()));
 }
 
 #[cfg(unix)]
@@ -145,13 +157,14 @@ fn resumed_window_title_includes_server_name_when_registry_matches_socket() {
 
     assert_eq!(
         resumed_window_title("session_parrot_123"),
-        "🦜 jcode/blazing parrot"
+        "🦜 jcode/blazing Parrot"
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn spawn_selfdev_in_new_terminal_uses_handterm_exec_mode() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
     let temp = tempfile::tempdir().expect("temp dir");
     let output_path = temp.path().join("selfdev-launch.txt");
     write_fake_handterm(&temp, &output_path);
@@ -172,15 +185,21 @@ fn spawn_selfdev_in_new_terminal_uses_handterm_exec_mode() {
     assert!(launched);
 
     let lines = wait_for_lines(&output_path, 5);
-    assert_eq!(lines[0], cwd.to_string_lossy());
-    assert_eq!(lines[1], "--standalone");
-    assert_eq!(lines[2], "--backend");
-    assert_eq!(lines[3], "gpu");
-    assert_eq!(lines[4], "--exec");
-    assert!(lines[5].contains("--resume"));
-    assert!(lines[5].contains("ses_selfdev_123"));
-    assert!(lines[5].contains("self-dev"));
-    assert!(lines[5].contains(exe.to_string_lossy().as_ref()));
+    // The fake terminal records the shell's physical cwd; on macOS the temp dir
+    // is reached through the /var -> /private/var symlink (#1153).
+    assert_eq!(
+        lines[0],
+        cwd.canonicalize()
+            .expect("canonicalize cwd")
+            .to_string_lossy()
+    );
+    assert_eq!(lines[1], "--backend");
+    assert_eq!(lines[2], "gpu");
+    assert_eq!(lines[3], "--exec");
+    assert!(lines[4].contains("--resume"));
+    assert!(lines[4].contains("ses_selfdev_123"));
+    assert!(lines[4].contains("self-dev"));
+    assert!(lines[4].contains(exe.to_string_lossy().as_ref()));
 }
 
 #[cfg(unix)]

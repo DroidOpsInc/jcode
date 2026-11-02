@@ -9,20 +9,28 @@ VERSION_NUM="${VERSION#v}"
 echo "Updating packages for $VERSION..."
 
 LINUX_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
-MACOS_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-aarch64.tar.gz"
+LINUX_ARM_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-aarch64.tar.gz"
+MACOS_ARM_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-aarch64.tar.gz"
+MACOS_INTEL_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-x86_64.tar.gz"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
 echo "Downloading assets for checksums..."
 curl -sL "$LINUX_URL" -o "$tmpdir/linux.tar.gz"
-curl -sL "$MACOS_URL" -o "$tmpdir/macos.tar.gz"
+curl -sL "$LINUX_ARM_URL" -o "$tmpdir/linux-arm.tar.gz"
+curl -sL "$MACOS_ARM_URL" -o "$tmpdir/macos-arm.tar.gz"
+curl -sL "$MACOS_INTEL_URL" -o "$tmpdir/macos-intel.tar.gz"
 
 LINUX_SHA=$(sha256sum "$tmpdir/linux.tar.gz" | cut -d' ' -f1)
-MACOS_SHA=$(sha256sum "$tmpdir/macos.tar.gz" | cut -d' ' -f1)
+LINUX_ARM_SHA=$(sha256sum "$tmpdir/linux-arm.tar.gz" | cut -d' ' -f1)
+MACOS_ARM_SHA=$(sha256sum "$tmpdir/macos-arm.tar.gz" | cut -d' ' -f1)
+MACOS_INTEL_SHA=$(sha256sum "$tmpdir/macos-intel.tar.gz" | cut -d' ' -f1)
 
-echo "  Linux SHA256: $LINUX_SHA"
-echo "  macOS SHA256: $MACOS_SHA"
+  echo "  Linux SHA256: $LINUX_SHA"
+echo "  Linux ARM64 SHA256: $LINUX_ARM_SHA"
+echo "  macOS ARM64 SHA256: $MACOS_ARM_SHA"
+echo "  macOS Intel SHA256: $MACOS_INTEL_SHA"
 
 # --- Homebrew tap ---
 echo ""
@@ -39,11 +47,20 @@ class Jcode < Formula
 
   on_macos do
     on_arm do
-      url "$MACOS_URL"
-      sha256 "$MACOS_SHA"
+      url "$MACOS_ARM_URL"
+      sha256 "$MACOS_ARM_SHA"
 
       def install
         bin.install "jcode-macos-aarch64" => "jcode"
+      end
+    end
+
+    on_intel do
+      url "$MACOS_INTEL_URL"
+      sha256 "$MACOS_INTEL_SHA"
+
+      def install
+        bin.install "jcode-macos-x86_64" => "jcode"
       end
     end
   end
@@ -54,7 +71,21 @@ class Jcode < Formula
       sha256 "$LINUX_SHA"
 
       def install
-        bin.install "jcode-linux-x86_64" => "jcode"
+        libexec.install "jcode-linux-x86_64", "jcode-linux-x86_64.bin"
+        libexec.install Dir["libssl.so*"], Dir["libcrypto.so*"]
+        (bin/"jcode").write <<~SH
+          #!/bin/sh
+          exec "#{libexec}/jcode-linux-x86_64" "\$@"
+        SH
+      end
+    end
+
+    on_arm do
+      url "$LINUX_ARM_URL"
+      sha256 "$LINUX_ARM_SHA"
+
+      def install
+        bin.install "jcode-linux-aarch64" => "jcode"
       end
     end
   end
@@ -89,7 +120,12 @@ source=("$LINUX_URL")
 sha256sums=('$LINUX_SHA')
 
 package() {
-    install -Dm755 "\${srcdir}/jcode-linux-x86_64" "\${pkgdir}/usr/bin/jcode"
+    install -Dm755 "\${srcdir}/jcode-linux-x86_64" "\${pkgdir}/usr/lib/jcode/jcode-linux-x86_64"
+    install -Dm755 "\${srcdir}/jcode-linux-x86_64.bin" "\${pkgdir}/usr/lib/jcode/jcode-linux-x86_64.bin"
+    install -Dm644 "\${srcdir}"/libssl.so* "\${pkgdir}/usr/lib/jcode/"
+    install -Dm644 "\${srcdir}"/libcrypto.so* "\${pkgdir}/usr/lib/jcode/"
+    mkdir -p "\${pkgdir}/usr/bin"
+    ln -s /usr/lib/jcode/jcode-linux-x86_64 "\${pkgdir}/usr/bin/jcode"
 }
 EOF
 

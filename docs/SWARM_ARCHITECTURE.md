@@ -1,10 +1,15 @@
-# Swarm Architecture (Proposed)
+# Swarm Architecture
 
-Status: Proposed
+Status: Largely implemented.
 
-This document captures the intended swarm coordination design based on the current
-project direction. It describes how agents coordinate, plan, communicate, and
-integrate work with optional git worktrees.
+Swarm mode (`/effort swarm`) does not change the system prompt. It appends
+"Use swarms to get things done in parallel." to each user message and runs the
+root at the configured `agents.swarm_root_effort`. The former deep task-graph
+mode (`swarm-deep`, critique/verify gates, `task_graph`/`expand_node`/
+`complete_node`/`inject_gap`) has been removed.
+
+This document captures the swarm coordination design. It describes how agents
+coordinate, plan, communicate, and integrate work with optional git worktrees.
 
 ## Goals
 
@@ -18,15 +23,47 @@ integrate work with optional git worktrees.
 
 ## Roles
 
+### Root-only spawning
+
+Swarms are one-level fan-out: only the root session may spawn agents. Workers
+report their result to the root and cannot create another generation. This
+keeps swarm use bounded by construction. The root session that first spawns in
+a repo is depth 0.
+
+The spawn/parent edge is encoded by `report_back_to_session_id`: a child spawned
+by `P` reports back to `P`. Walking that chain reconstructs ancestry and depth,
+so each agent "owns" the subtree it spawned. An agent may stop any agent in its
+own subtree (itself or a transitive descendant); `force=true` is still required
+to stop sessions outside the requester's subtree (e.g. user-created peers).
+
+When a mid-tree member leaves (stop, crash, disconnect, feature-off), its direct
+children are reparented rather than orphaned: they attach to their live
+grandparent, falling back to the current coordinator, else they become roots.
+Session renames (resume) rewrite children's report-back edges to the new id.
+This keeps ownership, stop permissions, subtree broadcast scope, and completion
+report-back coherent across member churn.
+
+The single per-swarm "coordinator" slot still exists, but only for shared,
+swarm-level plan operations (propose/approve/assign/task-control on the one
+shared plan). Only a root session claims that slot, and only when it is empty or
+stale.
+
+Nested owners coordinate their own subtree through spawn prompts, direct
+messages, and stop, not through the shared plan. Plan/task operations
+(`assign_task`, `assign_next`, `task_control`, `approve_plan`, `reject_plan`)
+deliberately stay gated to the root coordinator because there is exactly one
+`VersionedPlan` per `swarm_id`; allowing multiple coordinators to mutate it
+concurrently would make the shared plan incoherent.
+
 ### Coordinator
 
-- Creates the initial, comprehensive plan.
-- Spawns all subagents and assigns scopes.
-- Can shut down agents and spawn replacements as needed.
-- Is the only role allowed to spawn or stop agents.
-- Decides if a git worktree is needed and groups agents per worktree.
+- Owns the shared swarm-level plan: creates it, assigns scopes, approves updates.
 - Reviews plan update proposals and broadcasts approved updates.
 - Can issue plan updates directly when it discovers a plan issue.
+- Decides if a git worktree is needed and groups agents per worktree.
+- Holds the per-swarm coordinator slot for shared plan operations
+  (propose/approve/assign/task-control). This is a root-session role, not a
+  prerequisite for spawning.
 - Does not perform merges or integration.
 
 ### Worktree Manager
@@ -39,11 +76,16 @@ integrate work with optional git worktrees.
 ### Agents
 
 - Execute tasks in parallel.
-- Receive the full plan plus their scoped instructions on spawn.
+- Receive their assigned todo lane, prepopulated and rendered before work starts.
+  The existing lane is the source of truth and syncs only with that worker.
+  The spawn `prompt` is optional extra context, so coordinators need not repeat
+  lane tasks or details in a long prompt. A missing lane is created from the
+  prompt or label. The spawn result confirms the lane and seeded item count.
 - Propose plan updates when they discover issues or new requirements.
 - Coordinate directly with other agents via DM or channels.
 - Emit lifecycle events when they start, finish, or stop unexpectedly.
-- Cannot spawn or shut down other agents (including agents spawned by non-coordinator agents).
+- Cannot spawn agents. Stopping agents outside their own subtree requires
+  `force=true`.
 
 ## Agent Lifecycle States
 
@@ -63,6 +105,20 @@ integrate work with optional git worktrees.
 - The coordinator receives these events and decides next steps (respawn, rescope,
   shutdown, or mark complete).
 - Lifecycle updates drive the swarm info widget status indicators.
+
+## Automatic Worker Output
+
+- When an owned worker finishes a prompted turn, the server automatically forwards
+  a bounded tail of its output to the owning coordinator. Workers do not need a
+  reporting tool call, a special completion format, or a separate final-report DM.
+- Automatic output delivery covers spawn prompts, assigned plan tasks, and explicit
+  start/wake/resume/retry task-control runs. Lifecycle notifications still communicate
+  failures and status changes independently of the captured output.
+- Idle spawn-without-prompt sessions and user-created peers without a report-back
+  owner do not create completion deliveries.
+- Ordinary messages remain available for interactive coordination while work is
+  underway. The legacy explicit reporting action is retained only for compatibility
+  with old transcripts and scripts, and is not advertised to models.
 
 ## User Interaction
 
@@ -137,13 +193,29 @@ flowchart LR
 Explicit agent-to-agent communication is required for coordination and conflict
 resolution. The system supports:
 
-- Direct messages (DMs)
-- Swarm broadcast
-- Topic channels (group chats)
-- Shared context keys (set/read/append)
+- Direct messages (DMs) - the preferred exception channel
+- Subtree broadcast (reaches only the sender's spawned subtree; the swarm
+  coordinator keeps whole-swarm reach as an escape hatch)
+- Topic channels (group chats) - discouraged; prefer DMs
+- Shared context keys (set/read/append) - discouraged; prefer the repo and
+  typed node artifacts. Share notifications are subtree-scoped like broadcasts.
 - Channel discovery and member inspection
 
-All agents can broadcast and send DMs or channel messages.
+All agents can send DMs and subtree broadcasts.
+
+### Swarm labels and cross-swarm DMs
+
+Each swarm can carry a short, human-readable label (`set_swarm_label`), unique
+case-insensitively across swarms and persisted in
+`~/.jcode/state/swarm-labels.json`. `list_swarms` returns the live swarm
+directory: id, label, coordinator, member count, and which swarm is yours.
+
+Cross-swarm communication is DM-only. `dm` (or `message`) with
+`to_swarm=<label or id>` delivers to `to_session` inside that swarm, or to the
+swarm's coordinator when `to_session` is omitted. The recipient sees
+`Cross-swarm DM from <name> (swarm '<label>')` plus reply instructions.
+Broadcasts, channels, and shared context never cross swarm boundaries, so one
+swarm cannot flood another.
 
 All inter-agent communication is delivered as notifications (DMs, channel messages,
 broadcasts, plan updates, intent notices, and lifecycle events). Notifications are
