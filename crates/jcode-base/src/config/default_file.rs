@@ -536,8 +536,22 @@ preserve_reasoning_context = true
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
+# Switch immediately only for definitive usage exhaustion (default: true).
+# False preserves the countdown. Manual mode always disables automatic switching.
+exhausted_usage_immediate_failover = true
+# Retry short recoverable Anthropic throttles on the same account (default: true).
+# False yields immediately to the account router when other pool members exist.
+anthropic_retry_recoverable_rate_limits = true
 # Try another account on the same provider before switching providers (default: true)
 # same_provider_account_failover = false
+# Opt in to spending earned OpenAI banked resets at an exhausted weekly limit.
+# Retries the waiting request automatically. Never buys credits. Default: false.
+# openai_auto_banked_reset = true
+# Opt in separately to earned Anthropic Fable weekly resets. Never buys credits.
+# anthropic_auto_fable_reset = true
+# Preserve earned resets while another approved pool route is ready (default: true).
+# Set false to redeem before account/provider failover instead.
+# auto_reset_only_when_no_routes = true
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests
