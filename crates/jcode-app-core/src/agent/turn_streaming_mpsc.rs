@@ -1138,6 +1138,16 @@ impl Agent {
                     )
                     .saturating_add(output);
                 crate::session_metrics::record_token_usage(&self.session.id, total, output);
+                if usage_input.is_some() {
+                    crate::session_telemetry::save_context(
+                        &self.session,
+                        total.saturating_sub(output),
+                        Some(self.effective_context_budget().await),
+                        self.provider.name(),
+                        self.provider.active_resolved_credential(),
+                        self.provider.serving_oauth_account_label(),
+                    );
+                }
             }
 
             if usage_input.is_some()
@@ -1755,7 +1765,14 @@ impl Agent {
                     ));
 
                     let bg_info = crate::background::global()
-                        .adopt(&tc.name, &self.session.id, tool_handle)
+                        .adopt_with_options(
+                            &tc.name,
+                            tool_handoff::handoff_display_name(&tc.input),
+                            &self.session.id,
+                            true,
+                            false,
+                            tool_handle,
+                        )
                         .await;
 
                     let reason = if automatic_background {

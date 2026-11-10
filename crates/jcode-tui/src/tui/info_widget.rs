@@ -7,7 +7,8 @@
 
 pub use super::cloud_git::{DualGitInfo, RepoState};
 pub use super::cloud_status::{
-    CloudDirectoryEntry, CloudDirectorySnapshot, CloudMachineStats, CloudProbeState, CloudStatusInfo,
+    CloudDirectoryEntry, CloudDirectorySnapshot, CloudMachineStats, CloudProbeState,
+    CloudStatusInfo,
 };
 use super::color_support::rgb;
 #[path = "info_widget_commits.rs"]
@@ -71,6 +72,7 @@ pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
 pub(crate) use usage_render::render_inline_limit_bar;
 pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
+pub(crate) use usage_render::{LimitBar, limit_color as usage_limit_color};
 use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
@@ -678,6 +680,8 @@ pub struct InfoWidgetData {
     pub context_info: Option<ContextInfo>,
     /// True when context state is being updated and no authoritative snapshot is available.
     pub context_info_stale: bool,
+    /// Resume previews show a measured past request, not the active prompt.
+    pub historical_context: bool,
     pub queue_mode: Option<bool>,
     pub context_limit: Option<usize>,
     pub model: Option<String>,
@@ -1016,9 +1020,17 @@ impl Default for WidgetsState {
 
 /// Global widget state (for polling across frames)
 static WIDGETS_STATE: Mutex<Option<WidgetsState>> = Mutex::new(None);
+/// Separate widget state for secondary renders (resume preview) so their
+/// placements and animations never disturb the live session's widgets.
+static SECONDARY_WIDGETS_STATE: Mutex<Option<WidgetsState>> = Mutex::new(None);
 
 fn get_or_init_state() -> std::sync::MutexGuard<'static, Option<WidgetsState>> {
-    let mut guard = WIDGETS_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = if super::ui::secondary_render_active() {
+        &SECONDARY_WIDGETS_STATE
+    } else {
+        &WIDGETS_STATE
+    };
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(WidgetsState::default());
     }
@@ -1481,7 +1493,12 @@ fn overview_footer(data: &InfoWidgetData) -> String {
                 ""
             };
             format!(
-                "{estimate}{} ctx left",
+                "{}{estimate}{} ctx left",
+                if data.historical_context {
+                    "saved "
+                } else {
+                    ""
+                },
                 crate::kv_cache_monitor::format_token_count(left)
             )
         }

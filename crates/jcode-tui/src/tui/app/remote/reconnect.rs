@@ -5,8 +5,8 @@ use super::{
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::app::PendingReloadReconnectStatus;
 use crate::tui::backend::{RemoteConnection, RemoteDisconnectReason};
+use crate::tui::terminal_events::EventStream;
 use anyhow::Result;
-use crossterm::event::EventStream;
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use std::time::{Duration, Instant};
@@ -681,6 +681,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
             let sleep = tokio::time::sleep(backoff);
             tokio::pin!(sleep);
             let mut redraw = disconnected_redraw_interval(false, state);
+            let queued_before_wait = app.queued_messages.len();
             loop {
                 tokio::select! {
                     _ = &mut sleep => break,
@@ -695,6 +696,11 @@ pub(in crate::tui::app) async fn connect_with_retry(
                         )? {
                             return Ok(ConnectOutcome::Quit);
                         }
+                        // Enter must wake the retry timer, while ordinary editing,
+                        // empty submissions and local commands leave it alone.
+                        if submitted_during_backoff(queued_before_wait, app.queued_messages.len()) {
+                            break;
+                        }
                     }
                 }
             }
@@ -702,6 +708,10 @@ pub(in crate::tui::app) async fn connect_with_retry(
             Ok(ConnectOutcome::Retry)
         }
     }
+}
+
+pub(super) fn submitted_during_backoff(before: usize, after: usize) -> bool {
+    after > before
 }
 
 pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backend>(
@@ -979,6 +989,7 @@ pub(in crate::tui::app) fn queue_reload_continuation_once(
     }
     app.push_display_message(DisplayMessage::system(notice));
     app.hidden_queued_system_messages.push(continuation);
+    app.reload_recovery_dispatch_pending = true;
     true
 }
 

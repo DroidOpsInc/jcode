@@ -1895,3 +1895,34 @@ fn configured_endpoint_rebases_all_collector_paths() {
         "https://collector.example.com/v1/transcript"
     );
 }
+
+#[test]
+fn oauth_account_endpoints_follow_the_configured_collector() {
+    let configured = "https://collector.example.com/v1/event";
+    let rebase = |path: &str| {
+        rebase_endpoint(configured, &format!("{DEFAULT_TELEMETRY_ORIGIN}{path}"))
+    };
+    assert_eq!(
+        rebase("/v1/oauth-account"),
+        "https://collector.example.com/v1/oauth-account"
+    );
+    assert_eq!(
+        rebase("/v1/oauth-account/check"),
+        "https://collector.example.com/v1/oauth-account/check"
+    );
+}
+
+#[test]
+fn oauth_account_endpoint_is_none_without_a_collector() {
+    let _guard = lock_test_env();
+    jcode_core::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
+    assert_eq!(oauth_account_endpoint("/v1/oauth-account"), None);
+    jcode_core::env::set_var(
+        "JCODE_TELEMETRY_ENDPOINT",
+        "https://collector.example.com/v1/event",
+    );
+    assert_eq!(
+        oauth_account_endpoint("/v1/oauth-account").as_deref(),
+        Some("https://collector.example.com/v1/oauth-account")
+    );
+}

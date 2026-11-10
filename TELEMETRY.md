@@ -6,7 +6,8 @@
 > `${JCODE_HOME:-~/.jcode}/telemetry.toml`. The schema below describes what
 > *would* be sent if you opt in; nothing here phones home automatically.
 > The configured value is the event URL (for example `https://collector/v1/event`);
-> usage (`/v2/usage`) and transcript (`/v1/transcript`) uploads go to the same host.
+> usage (`/v2/usage`), transcript (`/v1/transcript`) and OAuth-account
+> (`/v1/oauth-account`, `/v1/oauth-account/check`) uploads go to the same host.
 
 jcode collects **minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. Ordinary telemetry does **not** contain prompts, source code, model responses, or conversation transcripts.
 

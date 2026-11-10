@@ -47,6 +47,7 @@ pub use group_transfer::{GroupTransferBundle, GroupTransferSelection, GroupTrans
 pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, PersistedVersionedPlan};
 mod idle_hibernation;
 mod jade_relay;
+mod lane_dispatch;
 mod lifecycle;
 mod live_status;
 mod live_turn;
@@ -449,181 +450,11 @@ struct HeadlessRecoveryStats {
     failed_to_load: usize,
 }
 
-async fn capture_runtime_memory_common_sample(
-    identity: &ServerIdentity,
-    client_count: &Arc<RwLock<usize>>,
-    server_start_time: Instant,
-    kind: &str,
-    source: &str,
-    trigger: RuntimeMemoryLogTrigger,
-    sampling: RuntimeMemoryLogSampling,
-) -> ServerRuntimeMemorySample {
-    let now = chrono::Utc::now();
-    let process =
-        crate::process_memory::snapshot_with_source(format!("server:runtime-log:{source}"));
-    let connected_count = *client_count.read().await;
-    let background_task_count = crate::background::global().list().await.len();
-    let embedder_stats = crate::embedding::stats();
-    let embedding_model_available = crate::embedding::is_model_available();
-
-    ServerRuntimeMemorySample {
-        schema_version: 2,
-        kind: kind.to_string(),
-        timestamp: now.to_rfc3339(),
-        timestamp_ms: now.timestamp_millis(),
-        source: source.to_string(),
-        trigger,
-        sampling,
-        server: ServerRuntimeMemoryServer {
-            id: identity.id.clone(),
-            name: identity.name.clone(),
-            icon: identity.icon.clone(),
-            version: identity.version.clone(),
-            git_hash: identity.git_hash.clone(),
-            uptime_secs: server_start_time.elapsed().as_secs(),
-        },
-        process_diagnostics: crate::runtime_memory_log::build_process_diagnostics(&process),
-        process,
-        clients: ServerRuntimeMemoryClients { connected_count },
-        sessions: None,
-        background: ServerRuntimeMemoryBackground {
-            task_count: background_task_count,
-        },
-        embeddings: ServerRuntimeMemoryEmbeddings {
-            model_available: embedding_model_available,
-            stats: embedder_stats,
-        },
-    }
-}
-
-async fn capture_runtime_memory_process_sample(
-    identity: &ServerIdentity,
-    client_count: &Arc<RwLock<usize>>,
-    server_start_time: Instant,
-    source: &str,
-    trigger: RuntimeMemoryLogTrigger,
-    sampling: RuntimeMemoryLogSampling,
-) -> ServerRuntimeMemorySample {
-    capture_runtime_memory_common_sample(
-        identity,
-        client_count,
-        server_start_time,
-        "process",
-        source,
-        trigger,
-        sampling,
-    )
-    .await
-}
-
-async fn capture_runtime_memory_attribution_sample(
-    identity: &ServerIdentity,
-    sessions: &SessionAgents,
-    client_count: &Arc<RwLock<usize>>,
-    server_start_time: Instant,
-    source: &str,
-    trigger: RuntimeMemoryLogTrigger,
-    sampling: RuntimeMemoryLogSampling,
-) -> ServerRuntimeMemorySample {
-    let mut sample = capture_runtime_memory_common_sample(
-        identity,
-        client_count,
-        server_start_time,
-        "attribution",
-        source,
-        trigger,
-        sampling,
-    )
-    .await;
-
-    let sessions_guard = sessions.read().await;
-    let live_count = sessions_guard.len();
-    let mut sampled_count = 0usize;
-    let mut contended_count = 0usize;
-    let mut memory_enabled_session_count = 0usize;
-    let mut total_message_count = 0u64;
-    let mut total_provider_cache_message_count = 0u64;
-    let mut total_json_bytes = 0u64;
-    let mut total_payload_text_bytes = 0u64;
-    let mut total_provider_cache_json_bytes = 0u64;
-    let mut total_tool_result_bytes = 0u64;
-    let mut total_provider_cache_tool_result_bytes = 0u64;
-    let mut total_large_blob_bytes = 0u64;
-    let mut total_provider_cache_large_blob_bytes = 0u64;
-    let mut top_sessions: Vec<ServerRuntimeMemoryTopSession> = Vec::new();
-
-    for (session_id, agent_arc) in sessions_guard.iter() {
-        let Ok(mut agent) = agent_arc.try_lock() else {
-            contended_count += 1;
-            continue;
-        };
-
-        sampled_count += 1;
-        let profile = agent.session_memory_profile_snapshot();
-        let memory_enabled = agent.memory_enabled();
-        if memory_enabled {
-            memory_enabled_session_count += 1;
-        }
-
-        let message_count = profile.message_count as u64;
-        let provider_cache_message_count = profile.provider_cache_message_count as u64;
-        let json_bytes = profile.total_json_bytes as u64;
-        let payload_text_bytes = profile.payload_text_bytes as u64;
-        let provider_cache_json_bytes = profile.provider_cache_json_bytes as u64;
-        let tool_result_bytes = profile.canonical_tool_result_bytes as u64;
-        let provider_cache_tool_result_bytes = profile.provider_cache_tool_result_bytes as u64;
-        let large_blob_bytes = profile.canonical_large_blob_bytes as u64;
-        let provider_cache_large_blob_bytes = profile.provider_cache_large_blob_bytes as u64;
-
-        total_message_count += message_count;
-        total_provider_cache_message_count += provider_cache_message_count;
-        total_json_bytes += json_bytes;
-        total_payload_text_bytes += payload_text_bytes;
-        total_provider_cache_json_bytes += provider_cache_json_bytes;
-        total_tool_result_bytes += tool_result_bytes;
-        total_provider_cache_tool_result_bytes += provider_cache_tool_result_bytes;
-        total_large_blob_bytes += large_blob_bytes;
-        total_provider_cache_large_blob_bytes += provider_cache_large_blob_bytes;
-
-        top_sessions.push(ServerRuntimeMemoryTopSession {
-            session_id: session_id.clone(),
-            provider: agent.provider_name(),
-            model: agent.provider_model(),
-            memory_enabled,
-            message_count,
-            provider_cache_message_count,
-            json_bytes,
-            payload_text_bytes,
-            provider_cache_json_bytes,
-            tool_result_bytes,
-            provider_cache_tool_result_bytes,
-            large_blob_bytes,
-            provider_cache_large_blob_bytes,
-        });
-    }
-    drop(sessions_guard);
-
-    top_sessions.sort_by(|left, right| right.json_bytes.cmp(&left.json_bytes));
-    top_sessions.truncate(5);
-
-    sample.sessions = Some(ServerRuntimeMemorySessions {
-        live_count,
-        sampled_count,
-        contended_count,
-        memory_enabled_session_count,
-        total_message_count,
-        total_provider_cache_message_count,
-        total_json_bytes,
-        total_payload_text_bytes,
-        total_provider_cache_json_bytes,
-        total_tool_result_bytes,
-        total_provider_cache_tool_result_bytes,
-        total_large_blob_bytes,
-        total_provider_cache_large_blob_bytes,
-        top_by_json_bytes: top_sessions,
-    });
-    sample
-}
+#[path = "server/runtime_memory_sampling.rs"]
+mod runtime_memory_sampling;
+use runtime_memory_sampling::{
+    capture_runtime_memory_attribution_sample, capture_runtime_memory_process_sample,
+};
 
 mod state;
 mod subscribe_working_dir;
@@ -670,7 +501,7 @@ pub use self::socket::{
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
-pub use self::util::ServerIdentity;
+pub use self::util::{MANAGED_CLOUD_LIVE_RELOAD_MARKER, ServerIdentity};
 pub(crate) use self::util::server_has_newer_binary;
 use self::util::{
     debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for, reload_exec_target,
@@ -1308,6 +1139,22 @@ impl Server {
             shutdown_signals: Arc::clone(&self.shutdown_signals),
             soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
         });
+        lane_dispatch::register_context(lane_dispatch::LaneDispatchContext {
+            provider: Arc::clone(&self.provider),
+            sessions: Arc::clone(&self.sessions),
+            global_session_id: Arc::clone(&self.session_id),
+            swarm_state: self.swarm_state.clone(),
+            channel_subscriptions: Arc::clone(&self.channel_subscriptions),
+            channel_subscriptions_by_session: Arc::clone(&self.channel_subscriptions_by_session),
+            event_history: Arc::clone(&self.event_history),
+            event_counter: Arc::clone(&self.event_counter),
+            swarm_event_tx: self.swarm_event_tx.clone(),
+            mcp_pool: Arc::clone(&self.mcp_pool),
+            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+            swarm_mutation_runtime: self.swarm_mutation_runtime.clone(),
+            client_connections: Arc::clone(&self.client_connections),
+        });
+        lane_dispatch::spawn_startup_scan(Duration::from_secs(5));
         // Every resume History asks whether the session has persisted
         // background tasks. The first ask after a reload scans the whole task
         // directory (~250ms) while clients are reconnecting; build the index
@@ -1554,6 +1401,12 @@ impl Server {
             Arc::clone(&self.sessions),
             Arc::clone(&self.swarm_state.members),
         );
+
+        // Upload transcripts for the iOS app when the user enabled mobile sync.
+        crate::mobile_sync::spawn_background_sync();
+        // On Jcode Cloud machines, run sessions the phone starts or continues.
+        crate::mobile_runner::spawn_cloud_runner();
+        Self::spawn_cloud_activity_keepalive(Arc::clone(&self.swarm_state.members));
 
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {
@@ -2077,6 +1930,25 @@ impl Server {
         });
     }
 
+    /// On Jcode Cloud the host powers off after 30 minutes without an SSH
+    /// client unless the busy marker is fresh. Turns keep running after the
+    /// client disconnects, so mark the host busy while any session runs.
+    fn spawn_cloud_activity_keepalive(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
+        if !crate::mobile_runner::is_cloud_machine() {
+            return;
+        }
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if Self::any_session_streaming(&swarm_members).await {
+                    crate::mobile_runner::touch_cloud_activity_marker();
+                }
+            }
+        });
+    }
+
     /// Whether at least one session is currently in the "running" state, i.e.
     /// actively streaming/processing a turn. This is the same signal that drives
     /// the Waybar "N streaming" indicator.
@@ -2417,6 +2289,21 @@ impl Server {
                     )
                     .await;
                 }
+                BusEvent::SwarmWorkerReported(event) => {
+                    background_tasks::dispatch_swarm_worker_report(
+                        &event,
+                        &sessions,
+                        &soft_interrupt_queues,
+                        live_turn::LiveTurnSwarmContext::new(
+                            &swarm_members,
+                            &swarms_by_id,
+                            &event_history,
+                            &event_counter,
+                            &swarm_event_tx,
+                        ),
+                    )
+                    .await;
+                }
                 BusEvent::SessionUpdateStatus(status) => {
                     let (session_id, event) = runtime_ssh_host::maintenance_event(status);
                     fanout_session_event(&swarm_members, &session_id, event).await;
@@ -2438,6 +2325,9 @@ impl Server {
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
+                    // Worker-owned lanes whose dependencies are met get a
+                    // worker automatically; no launch call is involved.
+                    self::lane_dispatch::on_todos_saved(&event.session_id, &event.todos);
                     // A coordinator's todo list is its lane plan: keep a
                     // running plan mirroring every save, so new or reshaped
                     // lanes are picked up without relaunching.
@@ -2485,6 +2375,10 @@ impl Server {
 
         #[cfg(unix)]
         let _daemon_lock = acquire_daemon_lock_for(&self.socket_path)?;
+
+        // Reap zombies and stop orphaned MCP servers left by a previous image
+        // of this PID (exec reload). Must run before this image spawns children.
+        crate::inherited_children::start();
 
         if socket_has_live_listener(&self.socket_path).await {
             anyhow::bail!(

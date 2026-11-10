@@ -103,6 +103,15 @@ fn rebase_endpoint(configured: &str, default_url: &str) -> String {
     format!("{base}{path}")
 }
 
+/// Collector URL for an OAuth-account path (`/v1/oauth-account[/check]`), or
+/// `None` when no collector is configured. The OAuth identity endpoints must
+/// follow the configured collector, never the upstream production origin.
+fn oauth_account_endpoint(path: &str) -> Option<String> {
+    configured_endpoint().map(|configured| {
+        rebase_endpoint(&configured, &format!("{DEFAULT_TELEMETRY_ORIGIN}{path}"))
+    })
+}
+
 #[cfg(not(test))]
 fn effective_endpoint(default_url: &str) -> Option<String> {
     configured_endpoint().map(|configured| rebase_endpoint(&configured, default_url))

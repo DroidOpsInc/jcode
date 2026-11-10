@@ -36,10 +36,14 @@ The `upstream` git remote is configured locally as fetch-only (push URL is `no-p
 ## Inbound sync (upstream → us)
 
 A scheduled GitLab CI job (`upstream-sync`) runs daily with the schedule
-variable `UPSTREAM_SYNC=true`. It fetches `upstream/master`, fast-forwards
-local `master`, and pushes back to `origin/master`. If the fast-forward fails
-(we have diverged from upstream), the job fails loudly — manual reconciliation
-required.
+variable `UPSTREAM_SYNC=true`. The fork carries local commits (CI, telemetry
+opt-in port), so `master` is not a pure mirror: the job fetches `upstream/master`
+with full history (`GIT_DEPTH: 0`; a shallow clone produces spurious conflicts),
+merges it into `master` (never rebase or force-push) and pushes `origin/master`.
+If the merge conflicts, the job aborts the merge, opens (or reuses) a
+`upstream-sync: merge conflict` issue and fails; reconcile by merging
+`upstream/master` locally, keeping the fork's intentional changes, and landing it
+through an MR.
 
 To enable the schedule:
 
