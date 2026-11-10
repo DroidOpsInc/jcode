@@ -121,6 +121,12 @@ rust-check:
     CARGO_PROFILE_TEST_OPT_LEVEL: "0"
     KUBERNETES_EPHEMERAL_STORAGE_REQUEST: "30Gi"
     KUBERNETES_EPHEMERAL_STORAGE_LIMIT: "40Gi"
+    # The merged upstream workspace OOM-killed the default pod at full cargo
+    # parallelism (job 2240977, exit 137). Same fit as rust-test: the runner
+    # memory cap is 6Gi, so bound the parallel rustc processes.
+    KUBERNETES_MEMORY_REQUEST: "4Gi"
+    KUBERNETES_MEMORY_LIMIT: "6Gi"
+    CARGO_BUILD_JOBS: "2"
   cache:
     key:
       files: [Cargo.lock]
