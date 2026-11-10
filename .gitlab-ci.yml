@@ -27,6 +27,11 @@ upstream-sync:
   image: alpine/git:latest
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $UPSTREAM_SYNC == "true"'
+  variables:
+    # Full history is required. With the default shallow clone (GIT_DEPTH 20) git cannot
+    # find the real merge base with upstream, merges against the shallow boundary and
+    # reports hundreds of spurious conflicts (jobs 2227559 and earlier).
+    GIT_DEPTH: "0"
   script:
     - |
       if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then

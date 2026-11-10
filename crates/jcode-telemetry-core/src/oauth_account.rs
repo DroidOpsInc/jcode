@@ -203,9 +203,11 @@ impl Transport for Http {
         if cfg!(test) {
             return None;
         }
+        // Opt-in fork: only ever talk to the configured collector.
+        let url = super::oauth_account_endpoint("/v1/oauth-account/check")?;
         let response = (|| {
             self.0
-                .post("https://telemetry.jcode.sh/v1/oauth-account/check")
+                .post(&url)
                 .json(&json!({"id":id,"provider":c.provider,"email_hash":hash(&c.email)}))
                 .send()?
                 .error_for_status()?
@@ -230,10 +232,13 @@ impl Transport for Http {
         if cfg!(test) || !super::is_enabled() {
             return;
         }
+        let Some(url) = super::oauth_account_endpoint("/v1/oauth-account") else {
+            return;
+        };
         // Never log requests, responses, errors, or raw identity values.
         if self
             .0
-            .post("https://telemetry.jcode.sh/v1/oauth-account")
+            .post(&url)
             .json(&json!({"id":id,"provider":c.provider,"email":c.email}))
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
