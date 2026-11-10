@@ -34,8 +34,8 @@ pub const TODO_QUALITY_GATE_MAX_APPROX_TOKENS: usize = 64;
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
     FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
-    IterationMaturity, TodoCompleteBlocker, TodoExternalBlocker, TodoGoal, TodoGoalChange,
-    TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
+    IterationMaturity, LANE_OWNER_WORKER, TodoCompleteBlocker, TodoExternalBlocker, TodoGoal,
+    TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
 };
 
 /// Return the canonical todo status for model-written status vocabulary.
@@ -893,6 +893,10 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
+    }
+
+    if let Some(title) = non_empty(plan.title.as_deref()) {
+        return Some(title);
     }
 
     let current = todos
