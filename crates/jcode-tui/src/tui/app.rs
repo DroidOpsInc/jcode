@@ -432,6 +432,8 @@ struct PendingFallbackOffer {
 /// one-keypress accept can resend it after the route switch completes.
 #[derive(Debug, Clone)]
 struct FallbackResendPayload {
+    /// Automatic retry budget already spent by this turn, across routes.
+    retry_attempts: u8,
     /// Expanded message content that was sent to the server.
     content: String,
     /// Inline image attachments that accompanied the message.
@@ -1607,6 +1609,7 @@ pub struct App {
     pending_route_selection: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_route: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_request_id: Option<u64>,
+    pending_automatic_failover_started: Option<Instant>,
     // Reasoning-effort variant chosen together with a model in the picker
     // (e.g. "gpt-5.5 (high)"), staged for remote mode alongside the model
     // switch. Without forwarding this to the server, it keeps its configured

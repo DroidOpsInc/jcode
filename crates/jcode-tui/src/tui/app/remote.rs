@@ -243,10 +243,20 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     let _ = check_debug_command(app, remote).await;
 
+    if app.pending_automatic_failover_request_id.is_some()
+        && app
+            .pending_automatic_failover_started
+            .is_some_and(|started| started.elapsed() >= Duration::from_secs(30))
+    {
+        fail_pending_automatic_failover(app, "Timed out waiting for route confirmation");
+        return true;
+    }
     let had_failover_countdown = app.pending_provider_failover.is_some();
     needs_redraw |= app.maybe_progress_provider_failover_countdown();
-    if had_failover_countdown {
-        if let Some(selection) = app.pending_automatic_failover_route.take() {
+    if had_failover_countdown || app.pending_automatic_failover_route.is_some() {
+        if app.pending_automatic_failover_request_id.is_none()
+            && let Some(selection) = app.pending_automatic_failover_route.take()
+        {
             app.pending_model_switch = None;
             match remote
                 .set_route_selection_for_failover(selection.clone())
@@ -254,6 +264,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             {
                 Ok(id) => {
                     app.pending_automatic_failover_request_id = Some(id);
+                    app.pending_automatic_failover_started = Some(Instant::now());
                     app.pending_automatic_failover_route = Some(selection);
                     app.remote_model_switch_in_flight = true;
                     forward_pending_reasoning_effort(app, remote).await;
@@ -275,7 +286,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return true;
     }
 
-    if app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some() {
+    if app.pending_fallback_resend.is_some()
+        && (app.remote_model_switch_in_flight || app.pending_route_selection.is_some())
+    {
         return needs_redraw;
     }
 
@@ -606,14 +619,24 @@ async fn apply_terminal_event<B: Backend>(
                 if let Some(selection) = app.pending_route_selection.take() {
                     app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     app.pending_model_switch = None;
-                    match remote.set_route_selection(selection).await {
-                        Ok(_) => {
+                    match remote.set_route_selection(selection.clone()).await {
+                        Ok(id) => {
+                            // Manual fallback offers use unrestricted SetRoute,
+                            // but need the same exact acknowledgement fence as
+                            // automatic failover before releasing their resend.
+                            if app.pending_fallback_resend.is_some() {
+                                app.pending_automatic_failover_route = Some(selection);
+                                app.pending_automatic_failover_request_id = Some(id);
+                                app.pending_automatic_failover_started = Some(Instant::now());
+                            }
                             app.remote_model_switch_in_flight = true;
                             forward_pending_reasoning_effort(app, remote).await;
                         }
                         Err(error) => {
                             app.pending_reasoning_effort = None;
-                            app.pending_fallback_resend = None;
+                            if let Some(payload) = app.pending_fallback_resend.take() {
+                                app.restore_failover_payload(payload);
+                            }
                             app.push_display_message(DisplayMessage::error(format!(
                                 "Failed to request model switch: {}",
                                 error
@@ -1118,11 +1141,31 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
     )
 }
 
+fn fail_pending_automatic_failover(app: &mut App, reason: &str) {
+    app.pending_automatic_failover_request_id = None;
+    app.pending_automatic_failover_started = None;
+    app.pending_automatic_failover_route = None;
+    app.remote_model_switch_in_flight = false;
+    if let Some(payload) = app.pending_fallback_resend.take() {
+        app.restore_failover_payload(payload);
+    }
+    app.push_display_message(DisplayMessage::error(format!(
+        "Fallback switch stopped: {}",
+        App::compact_provider_failure(reason)
+    )));
+    app.set_status_notice("Fallback switch stopped; resend manually");
+}
+
 pub(super) fn handle_disconnect(
     app: &mut App,
     state: &mut RemoteRunState,
     reason: Option<RemoteDisconnectReason>,
 ) {
+    // The daemon may have applied the switch, but the acknowledgement was
+    // lost. Never wait on an old connection's request ID or blindly resend.
+    if app.pending_automatic_failover_request_id.is_some() {
+        fail_pending_automatic_failover(app, "Connection lost before route confirmation");
+    }
     app.revoke_cloud_environment();
     let detail = if state.server_reload_in_progress {
         "server reload in progress".to_string()
@@ -1422,6 +1465,9 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
     if app.pending_provider_failover.is_some()
+        || app.pending_automatic_failover_route.is_some()
+        || app.pending_automatic_failover_request_id.is_some()
+        || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some())
         || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
     {
         return;
@@ -1482,6 +1528,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
         app.last_submitted_input = payload.raw_input.clone();
         crate::logging::info("Resending failed turn after accepted fallback route switch");
+        let recovery_payload = payload.clone();
         if let Err(error) = begin_remote_send(
             app,
             remote,
@@ -1490,10 +1537,11 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             payload.is_system,
             payload.system_reminder,
             payload.auto_retry,
-            0,
+            payload.retry_attempts.saturating_add(1),
         )
         .await
         {
+            app.restore_failover_payload(recovery_payload);
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to resend after fallback switch: {}",
                 error
