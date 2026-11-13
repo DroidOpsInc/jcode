@@ -37,9 +37,11 @@ The `upstream` git remote is configured locally as fetch-only (push URL is `no-p
 
 A scheduled GitLab CI job (`upstream-sync`) runs daily with the schedule
 variable `UPSTREAM_SYNC=true`. The fork carries local commits (CI, telemetry
-opt-in port), so `master` is not a pure mirror: the job fetches `upstream/master`
-with full history (`GIT_DEPTH: 0`; a shallow clone produces spurious conflicts),
-merges it into `master` (never rebase or force-push) and pushes `origin/master`.
+opt-in port), so `master` is not a pure mirror: the job needs full history (a
+shallow clone produces spurious conflicts), but a full clone from GitLab is cut
+off at 10 minutes, so it skips the runner clone (`GIT_STRATEGY: none`), fetches
+`upstream/master` from GitHub first and then only the fork's own commits from
+`origin/master`, merges it into `master` (never rebase or force-push) and pushes `origin/master`.
 If the merge conflicts, the job aborts the merge, opens (or reuses) a
 `upstream-sync: merge conflict` issue and fails; reconcile by merging
 `upstream/master` locally, keeping the fork's intentional changes, and landing it

@@ -1,3 +1,5 @@
+> **DroidOpsInc fork** of [1jehuang/jcode](https://github.com/1jehuang/jcode) (MIT), merged from upstream daily. Fork scope, branch model and CI are in [DROIDOPS.md](DROIDOPS.md); the install script below installs upstream releases. _Last verified: 2026-11-13._
+
 <div align="center">
 
 <p>

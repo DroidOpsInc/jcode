@@ -28,10 +28,13 @@ upstream-sync:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $UPSTREAM_SYNC == "true"'
   variables:
-    # Full history is required. With the default shallow clone (GIT_DEPTH 20) git cannot
-    # find the real merge base with upstream, merges against the shallow boundary and
-    # reports hundreds of spurious conflicts (jobs 2227559 and earlier).
-    GIT_DEPTH: "0"
+    # Full history is required: with a shallow clone git cannot find the real merge base
+    # with upstream and reports hundreds of spurious conflicts (jobs 2227559 and earlier).
+    # But a full clone of the ~480 MB repo from GitLab is cut off at 10 minutes
+    # (jobs 2370111, 2411119: "curl 18 transfer closed with outstanding read data").
+    # So the runner skips its own clone; the script takes the shared history from
+    # upstream first and then fetches only the fork's own commits from GitLab.
+    GIT_STRATEGY: none
   script:
     - |
       if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
@@ -39,11 +42,14 @@ upstream-sync:
         echo "Create a project access token with write_repository scope and store it as a masked CI variable."
         exit 1
       fi
+    - rm -rf "${CI_PROJECT_DIR}/.sync" && git init -q "${CI_PROJECT_DIR}/.sync" && cd "${CI_PROJECT_DIR}/.sync"
     - git config user.email "ci@droidopsinc.dev"
     - git config user.name "DroidOps CI (jcode upstream sync)"
-    - git remote add upstream "${UPSTREAM_URL}" || git remote set-url upstream "${UPSTREAM_URL}"
+    - git remote add upstream "${UPSTREAM_URL}"
+    - git remote add origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
     - git fetch upstream "${UPSTREAM_BRANCH}"
     - git fetch upstream --tags
+    - git fetch origin "${UPSTREAM_BRANCH}"
     - git checkout -B "${UPSTREAM_BRANCH}" "refs/remotes/origin/${UPSTREAM_BRANCH}"
     - |
       if ! git merge --no-edit "upstream/${UPSTREAM_BRANCH}"; then
@@ -78,12 +84,18 @@ upstream-merge-check:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   allow_failure: true
   variables:
-    GIT_DEPTH: "0"
+    # Same fetch order as upstream-sync: shared history from upstream, then only the
+    # MR's own commits from GitLab (a full GitLab clone is cut off at 10 minutes).
+    GIT_STRATEGY: none
   script:
+    - rm -rf "${CI_PROJECT_DIR}/.sync" && git init -q "${CI_PROJECT_DIR}/.sync" && cd "${CI_PROJECT_DIR}/.sync"
     - git config user.email "ci@droidopsinc.dev"
     - git config user.name "DroidOps CI (jcode merge check)"
-    - git remote add upstream "${UPSTREAM_URL}" || git remote set-url upstream "${UPSTREAM_URL}"
+    - git remote add upstream "${UPSTREAM_URL}"
+    - git remote add origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
     - git fetch --quiet upstream "${UPSTREAM_BRANCH}"
+    - git fetch --quiet origin "refs/merge-requests/${CI_MERGE_REQUEST_IID}/head:mr-head"
+    - git checkout -q mr-head
     - |
       if git merge --no-commit --no-ff "upstream/${UPSTREAM_BRANCH}"; then
         git merge --abort || true
