@@ -123,6 +123,9 @@ pub struct HistoryBase {
 /// Synthetic lazy-window marker used by remote transcript bootstraps.
 pub const RECENT_HISTORY_MARKER_PREFIX: &str = "Earlier remote history - ";
 
+/// `Pong.capabilities` entry of servers that accept `Request::ClientFocus`.
+pub const CLIENT_FOCUS_CAPABILITY: &str = "client_focus";
+
 impl HistoryBase {
     /// Request a bounded initial view. Older servers ignore this hint and
     /// return their ordinary full History payload.
@@ -708,7 +711,7 @@ pub struct SwarmMemberRuntime {
     /// sessions that have not emitted live telemetry. Never session totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_status: Option<SwarmLiveStatus>,
-    /// Foreground blocking operation or completely blocked todo pause. A display reason,
+    /// Foreground blocking operation or user-authorization todo pause. A display reason,
     /// not an automatically waking durable dependency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_reason: Option<String>,
@@ -855,6 +858,7 @@ impl Request {
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::GetTodos { id } => *id,
+            Request::ClientFocus { id, .. } => *id,
             Request::DebugCommand { id, .. } => *id,
             Request::ClientDebugCommand { id, .. } => *id,
             Request::ClientDebugResponse { id, .. } => *id,

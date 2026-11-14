@@ -279,16 +279,58 @@ fn model_facing_descriptions_stay_compact() {
         "todo description bytes: {bytes}; schema bytes: {}",
         schema.to_string().len()
     );
-    assert!(bytes < 3_500, "todo descriptions grew to {bytes} bytes");
-    for route in ["add", "update"] {
-        let properties = &schema["properties"][route]["items"]["properties"];
-        for field in ["description", "status", "priority", "lane", "phase"] {
-            assert!(
-                properties[field].get("description").is_none(),
-                "{route}.{field}"
-            );
-        }
+    // Item-field guidance is written once, on add. update and phases repeat
+    // the fields without descriptions.
+    assert!(bytes < 2_600, "todo descriptions grew to {bytes} bytes");
+    assert!(
+        schema.to_string().len() < 8_100,
+        "todo schema grew to {} bytes",
+        schema.to_string().len()
+    );
+    let add = &schema["properties"]["add"]["items"]["properties"];
+    for field in ["description", "status", "priority", "lane", "phase"] {
+        assert!(add[field].get("description").is_none(), "add.{field}");
     }
+    let phase_item = &schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]["properties"]
+        ["items"]["items"]["properties"];
+    for (field, property) in phase_item.as_object().unwrap() {
+        assert!(
+            property.get("description").is_none(),
+            "phases.{field} repeats a description already given on add"
+        );
+    }
+    // update lists only what add does not already describe.
+    let update = &schema["properties"]["update"]["items"];
+    let mut fields: Vec<&String> = update["properties"].as_object().unwrap().keys().collect();
+    fields.sort();
+    assert_eq!(fields, ["name", "rename_to"]);
+    assert_eq!(update["additionalProperties"], true);
+}
+
+#[test]
+fn update_rejects_fields_the_open_schema_cannot_catch() {
+    let stored = || json!([{"id": "a", "content": "a", "status": "pending", "priority": "high"}]);
+    let error = apply_todo_patch(
+        json!({"update": [{"id": "a", "statuss": "completed"}]}),
+        stored,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("unknown update field \"statuss\""),
+        "{error}"
+    );
+
+    let patched = apply_todo_patch(
+        json!({"update": [{
+            "id": "a", "status": "in_progress", "priority": "low", "lane": "x", "phase": 2,
+            "confidence": "plausible", "waiting_on": {"ids": ["t1"], "reason": "build"}
+        }]}),
+        stored,
+    )
+    .unwrap();
+    assert_eq!(patched["todos"][0]["status"], "in_progress");
+    assert_eq!(patched["todos"][0]["group"], "x");
 }
 
 #[test]
@@ -300,7 +342,9 @@ fn add_schema_declares_all_todo_fields_and_conforms_to_gemini() {
         .as_object()
         .unwrap()
     {
-        assert_eq!(&add["properties"][name], property, "{name}");
+        let mut described = add["properties"][name].clone();
+        described.as_object_mut().unwrap().remove("description");
+        assert_eq!(&described, property, "{name}");
     }
     assert_eq!(add["properties"]["after"]["type"], "string");
     let errors = jcode_schema_dialect::must_not_contain_unsupported_constructs(
@@ -354,7 +398,7 @@ fn schema_advertises_intent_and_todos() {
     assert!(item_props.contains_key("completion_confidence"));
     assert!(!item_props.contains_key("closed_feedback_loop"));
     assert_eq!(
-        item_props["confidence"]["description"],
+        props["add"]["items"]["properties"]["confidence"]["description"],
         "Evidence that the task can be completed correctly."
     );
 
@@ -399,7 +443,8 @@ fn schema_advertises_intent_and_todos() {
     assert!(!goal_props.contains_key("user_intention"));
     assert!(!goal_props.contains_key("alignment_score"));
     assert!(!goal_props.contains_key("objective"));
-    assert_eq!(goal_props.len(), 11);
+    assert!(goal_props.contains_key("cannot_complete"));
+    assert_eq!(goal_props.len(), 12);
     assert_eq!(
         goal_props["feedback_loop_relevance"]["enum"],
         json!([

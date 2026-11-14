@@ -256,6 +256,40 @@ impl App {
         format!("↪ Switching to {to_label} in 3s. Esc to cancel.")
     }
 
+    fn failover_switching_message(to_label: &str) -> String {
+        format!("↪ Switching to {to_label} and retrying.")
+    }
+
+    /// The in-flight switch line is superseded by the confirmed
+    /// "Switched to model" notice, which names the model and account.
+    fn remove_failover_switching_message(&mut self) {
+        if let Some(idx) = self.display_messages.iter().rposition(|message| {
+            message.role == "system"
+                && message.content.starts_with("↪ Switching to ")
+                && message.content.ends_with(" and retrying.")
+        }) {
+            self.remove_display_message(idx);
+        }
+    }
+
+    /// The whole outcome of an automatic failover on one line. A spent
+    /// account's error says nothing the notice does not, so it is folded in
+    /// as the cause. Any other error stays visible above the notice.
+    pub(super) fn confirmed_failover_message(&mut self, model: &str, suffix: &str) -> String {
+        self.remove_failover_switching_message();
+        let usage_exhausted = self.display_messages.last().is_some_and(|message| {
+            message.role == "error"
+                && jcode_provider_core::is_definitive_usage_exhaustion(&message.content)
+        });
+        let cause = if usage_exhausted {
+            self.remove_display_message(self.display_messages.len() - 1);
+            "Usage limit reached. "
+        } else {
+            ""
+        };
+        format!("✓ {cause}Switched to model: {model}{suffix}. Retrying.")
+    }
+
     /// The countdown line is only meaningful while the countdown runs. Once the
     /// switch happens (or is canceled), drop it so the transcript keeps just the
     /// outcome rather than how long we waited.
@@ -311,6 +345,7 @@ impl App {
                     .find(|selection| selection.routed_model_spec() == target)
             });
             let Some(selection) = selection else {
+                self.automatic_failover_stopped = true;
                 if let Some(payload) = pending.remote_resend {
                     self.restore_failover_payload(payload);
                 }
@@ -329,11 +364,13 @@ impl App {
             return true;
         }
         match self.apply_provider_switch_for_failover(&pending.prompt) {
-            Ok(_active_model) => {
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Switched {} → {}. Retrying.",
-                    pending.prompt.from_label, pending.prompt.to_label,
-                )));
+            Ok(active_model) => {
+                let suffix = switched_model_account_suffix(
+                    self.provider.active_auth_method_label(),
+                    self.provider.active_oauth_account_email().as_deref(),
+                );
+                let message = self.confirmed_failover_message(&active_model, &suffix);
+                self.push_display_message(DisplayMessage::system(message));
                 self.set_status_notice(format!(
                     "Provider → {} (retrying)",
                     pending.prompt.to_label
@@ -342,6 +379,7 @@ impl App {
                 true
             }
             Err(error) => {
+                self.automatic_failover_stopped = true;
                 self.pending_turn = false;
                 self.push_display_message(DisplayMessage::error(format!(
                     "Failed to switch provider to {}: {}",
@@ -377,11 +415,20 @@ impl App {
         self.handle_provider_failover_prompt_with_payload(prompt, remote_resend);
     }
 
-    fn handle_provider_failover_prompt_with_payload(
+    pub(super) fn handle_provider_failover_prompt_with_payload(
         &mut self,
         prompt: crate::provider::ProviderFailoverPrompt,
         remote_resend: Option<super::FallbackResendPayload>,
     ) {
+        // Duplicate provider prompts must not replace the held payload, restart
+        // a countdown, or dispatch another switch before acknowledgement.
+        if self.pending_provider_failover.is_some()
+            || self.pending_automatic_failover_route.is_some()
+            || self.pending_automatic_failover_request_id.is_some()
+            || self.automatic_failover_stopped
+        {
+            return;
+        }
         super::commands::disable_auto_poke(self);
         self.overnight_auto_poke = None;
         self.clear_pending_remote_retry();
@@ -389,10 +436,20 @@ impl App {
         self.pending_automatic_failover_route = None;
         self.clear_pending_fallback_offer();
         let reason = Self::compact_provider_failure(&prompt.reason);
-        let manual_message = format!(
-            "{} unavailable: {}\nUse /model to switch to {} and resend.",
-            prompt.from_label, reason, prompt.to_label,
-        );
+        // The caller often printed the provider error just above. Do not
+        // repeat the same cause on the next line.
+        let cause_already_shown = self
+            .display_messages
+            .last()
+            .is_some_and(|message| message.role == "error" && message.content.contains(&reason));
+        let manual_message = if cause_already_shown {
+            format!("Use /model to switch to {} and resend.", prompt.to_label)
+        } else {
+            format!(
+                "{} unavailable: {}\nUse /model to switch to {} and resend.",
+                prompt.from_label, reason, prompt.to_label,
+            )
+        };
 
         let config = crate::config::Config::load().provider;
         if remote_resend
@@ -400,6 +457,7 @@ impl App {
             .is_some_and(|payload| payload.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS)
             && config.cross_provider_failover == crate::config::CrossProviderFailoverMode::Countdown
         {
+            self.automatic_failover_stopped = true;
             if let Some(payload) = remote_resend {
                 self.restore_failover_payload(payload);
             }
@@ -427,8 +485,27 @@ impl App {
                         || crate::provider::MultiProvider::is_failover_route_pool_approved(route)
                 }) && (!self.is_remote || remote_resend.is_some()) =>
             {
+                let target = prompt.target_route.as_ref().expect("approved target");
+                if self.automatic_failover_targets.contains(target)
+                    || self.automatic_failover_targets.len()
+                        >= usize::from(Self::AUTO_RETRY_MAX_ATTEMPTS)
+                {
+                    self.automatic_failover_stopped = true;
+                    if let Some(payload) = remote_resend {
+                        self.restore_failover_payload(payload);
+                    }
+                    self.pending_turn = false;
+                    self.push_display_message(DisplayMessage::system(
+                        "Stopped automatic failover: no working route found. Use /model to choose an account and resend manually.".to_string(),
+                    ));
+                    self.set_status_notice("Paused: automatic failover stopped");
+                    return;
+                }
+                // Only the first switch gets the fast path. An exhausted
+                // fallback must not create an instantaneous account loop.
                 let immediate = config.exhausted_usage_immediate_failover
-                    && jcode_provider_core::is_definitive_usage_exhaustion(&prompt.reason);
+                    && self.automatic_failover_targets.is_empty();
+                self.automatic_failover_targets.push(target.clone());
                 self.pending_provider_failover = Some(super::PendingProviderFailover {
                     prompt: prompt.clone(),
                     deadline: Instant::now() + Duration::from_secs(if immediate { 0 } else { 3 }),
@@ -451,10 +528,9 @@ impl App {
                     // and remote route acknowledgement before resending the payload.
                     self.maybe_progress_provider_failover_countdown();
                     if self.pending_automatic_failover_route.is_some() {
-                        self.push_display_message(DisplayMessage::system(format!(
-                            "↪ Switching to {}. Retrying after route confirmation.",
-                            prompt.to_label
-                        )));
+                        self.push_display_message(DisplayMessage::system(
+                            Self::failover_switching_message(&prompt.to_label),
+                        ));
                     }
                     return;
                 }
@@ -646,6 +722,7 @@ impl App {
         // Never compete with the automatic countdown switcher. A migration
         // lease block is not a provider failure: switching model cannot help.
         if self.pending_provider_failover.is_some()
+            || self.automatic_failover_stopped
             || self.pending_automatic_failover_route.is_some()
             || self.pending_automatic_failover_request_id.is_some()
             || error.contains("Session is not runnable here")

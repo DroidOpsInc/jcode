@@ -1272,12 +1272,13 @@ fn handle_server_event_inner(
             // or awaiting acknowledgement. It belongs to the failed route, not
             // a new turn: do not print it again or replace the held payload.
             if (app.pending_provider_failover.is_some()
+                || app.automatic_failover_stopped
                 || app.pending_automatic_failover_route.is_some()
                 || app.pending_automatic_failover_request_id.is_some()
                 || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some()))
                 && (crate::provider::parse_failover_prompt_message(&message).is_some()
                     || jcode_provider_core::classify_failover_error_message(&message)
-                        .should_mark_provider_unavailable())
+                        .should_failover())
             {
                 return false;
             }
@@ -2515,9 +2516,10 @@ fn handle_server_event_inner(
         ServerEvent::Todos {
             session_id,
             payload,
+            pushes,
         } => {
-            app.receive_remote_todos(session_id, payload);
-            true
+            app.remote_todos_pushed = pushes;
+            app.receive_remote_todos(session_id, payload)
         }
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {
@@ -2746,6 +2748,7 @@ fn handle_server_event_inner(
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                let automatic_failover = automatic_route.is_some();
                 if let Some(selection) = automatic_route {
                     app.session.route_api_method = Some(selection.api_method);
                 }
@@ -2806,10 +2809,15 @@ fn handle_server_event_inner(
                             .filter(|_| is_oauth)
                             .map(|email| email.as_str()),
                     );
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "✓ Switched to model: {}{}",
-                        model, suffix
-                    )));
+                    // One line for an automatic failover: the confirmed route
+                    // replaces the in-flight "Switching to" line and absorbs
+                    // a usage-limit error as its cause.
+                    let message = if automatic_failover {
+                        app.confirmed_failover_message(&model, &suffix)
+                    } else {
+                        format!("✓ Switched to model: {}{}", model, suffix)
+                    };
+                    app.push_display_message(DisplayMessage::system(message));
                 }
                 if model_actually_changed {
                     app.set_status_notice(format!("Model → {}", model));
@@ -3369,7 +3377,42 @@ fn handle_server_event_inner(
                 return false;
             }
             if crate::tui::is_ssh_remote() {
+                finish_remote_split_launch(app);
                 app.pending_split_request = false;
+                app.pending_split_model_override = None;
+                app.pending_split_provider_key_override = None;
+                app.pending_split_label = None;
+                // The armed-prompt hotkey forks on the VM. Stage the prompt for
+                // a second SSH client, which submits it once attached.
+                if let Some(prompt) = app.pending_split_prompt.take() {
+                    App::save_startup_submission_for_session(
+                        &new_session_id,
+                        prompt.content,
+                        prompt.images,
+                    );
+                    let manual = app_mod::ssh_child_manual_command(&new_session_id);
+                    match app_mod::spawn_ssh_child_in_new_terminal(&new_session_id) {
+                        Ok(true) => {
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "Prompt launched in {new_session_name} on the remote host (opened in new window)",
+                            )));
+                            app.set_status_notice(format!("Prompt → {new_session_name}"));
+                        }
+                        Ok(false) => {
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "Remote session {new_session_name} created with your prompt staged.\n\nNo terminal found. Open it manually:\n  {manual}",
+                            )));
+                            app.set_status_notice("Prompt session created");
+                        }
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Remote session {new_session_name} was created but failed to open a window: {error}\n\nOpen it manually:\n  {manual}",
+                            )));
+                            app.set_status_notice("Prompt window failed");
+                        }
+                    }
+                    return true;
+                }
                 app.set_status_notice(format!(
                     "Remote session created: {new_session_id}. Resume using --ssh and --resume."
                 ));

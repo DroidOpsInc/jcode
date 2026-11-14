@@ -1823,10 +1823,9 @@ impl App {
         }
     }
 
+    /// Works over SSH too: the fork is created by the attached daemon and the
+    /// new window is another SSH client, so nothing is read from this machine.
     pub(crate) fn toggle_next_prompt_new_session_routing(&mut self) {
-        if super::commands_dispatch::ssh_local_action_blocked(self, "New-session routing") {
-            return;
-        }
         self.route_next_prompt_to_new_session = !self.route_next_prompt_to_new_session;
         if self.route_next_prompt_to_new_session {
             self.set_status_notice("Next prompt → new session");
@@ -3443,7 +3442,12 @@ impl App {
     /// release, which doubled the frames drawn while typing.
     pub(super) fn key_release_visible_state(
         &self,
-    ) -> (bool, bool, Option<char>, Option<super::voice_input::VoicePhase>) {
+    ) -> (
+        bool,
+        bool,
+        Option<char>,
+        Option<super::voice_input::VoicePhase>,
+    ) {
         // Badges render only through the `*_is_active` gates (the held key
         // only shows under Alt+Shift), so compare those, not raw fields.
         let now = std::time::Instant::now();
@@ -4088,6 +4092,8 @@ impl App {
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
         self.last_submitted_input = Some(raw_input.clone());
+        self.automatic_failover_targets.clear();
+        self.automatic_failover_stopped = false;
 
         // See `stage_turn_for_remote_tick_loop`: a remote client must never
         // park on the local-only `pending_turn` flag.
@@ -4209,6 +4215,10 @@ impl App {
             let combined = messages.join("\n\n");
             let has_combined = !combined.is_empty();
             let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+            if !messages.is_empty() && !preserve_visible_turn {
+                self.automatic_failover_targets.clear();
+                self.automatic_failover_stopped = false;
+            }
 
             self.commit_pending_streaming_assistant_message();
 

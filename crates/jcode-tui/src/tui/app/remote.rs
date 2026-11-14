@@ -99,6 +99,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             "Could not clear expired cloud resource tools: {error}"
         ));
     }
+    app.expire_presumed_focus();
+    crate::tui::window_visibility::poll(app.client_focused(), app.is_processing);
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     crate::tui::ui::set_frame_input_attribution(crate::tui::ui::FrameInputAttribution {
@@ -113,7 +115,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         | crate::tui::terminal_events::theme_redraw_pending();
     needs_redraw |= app.poll_pending_startup_transcript();
     if remote.has_loaded_history()
-        && let Err(error) = remote.poll_account_usage().await
+        && let Err(error) = remote
+            .poll_account_usage_for_focus(app.client_focused())
+            .await
     {
         crate::logging::warn(&format!("Failed to request daemon account usage: {error}"));
     }
@@ -433,6 +437,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
         let combined = messages.join("\n\n");
         let auto_retry = reminder.is_some() && messages.is_empty();
+        if !messages.is_empty() && !super::commands::queued_messages_are_only_pokes(&messages) {
+            app.automatic_failover_targets.clear();
+            app.automatic_failover_stopped = false;
+        }
         crate::logging::info(&format!(
             "Sending queued continuation message ({} chars)",
             combined.len()
@@ -1142,6 +1150,7 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
 }
 
 fn fail_pending_automatic_failover(app: &mut App, reason: &str) {
+    app.automatic_failover_stopped = true;
     app.pending_automatic_failover_request_id = None;
     app.pending_automatic_failover_started = None;
     app.pending_automatic_failover_route = None;
@@ -1727,6 +1736,8 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         // send while still compiling, so the comment marks why the take matters.
         let interleave_images = std::mem::take(&mut app.interleave_images);
         if !interleave_msg.trim().is_empty() {
+            app.automatic_failover_targets.clear();
+            app.automatic_failover_stopped = false;
             app.push_display_message(DisplayMessage {
                 role: "user".to_string(),
                 content: interleave_msg.clone(),
@@ -1764,6 +1775,10 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
         let combined = messages.join("\n\n");
         let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+        if !messages.is_empty() && !preserve_visible_turn {
+            app.automatic_failover_targets.clear();
+            app.automatic_failover_stopped = false;
+        }
         let auto_retry = reminder.is_some() && messages.is_empty();
         for msg in display_system_messages {
             app.push_display_message(DisplayMessage::system(msg));

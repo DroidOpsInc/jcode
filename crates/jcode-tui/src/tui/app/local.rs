@@ -81,6 +81,8 @@ pub(super) async fn process_turn_with_input(
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
     let reset_redraw = app.poll_usage_reset() | app.poll_cloud_job();
+    app.expire_presumed_focus();
+    crate::tui::window_visibility::poll(app.client_focused(), app.is_processing);
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
@@ -463,8 +465,8 @@ fn apply_terminal_event(
             let key = jcode_tui_core::korean_input::normalize_key_event(key);
             crate::tui::ui::note_key_event_read();
             app.note_client_interaction();
-            let before_release = (key.kind == KeyEventKind::Release)
-                .then(|| app.key_release_visible_state());
+            let before_release =
+                (key.kind == KeyEventKind::Release).then(|| app.key_release_visible_state());
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
             if app.handle_voice_key_event(&key) {

@@ -104,11 +104,13 @@ mod remote;
 mod remote_header_hint;
 mod remote_notifications;
 mod replay;
+mod replay_export;
 mod response_output;
 pub(crate) mod run_shell;
 mod runtime_memory;
 mod shortcut_hints;
 mod slash_command_parser;
+mod spinner_ticker;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
@@ -1106,6 +1108,10 @@ pub struct App {
     overnight_auto_poke: Option<OvernightAutoPokeState>,
     // Pending cross-provider resend after a failover warning/countdown.
     pending_provider_failover: Option<PendingProviderFailover>,
+    /// Automatic targets attempted for the logical user turn, including held
+    /// resends. Never reset this merely because a retry starts a new API call.
+    automatic_failover_targets: Vec<String>,
+    automatic_failover_stopped: bool,
     // Interactive "switch to next best model/method and resend" offer surfaced
     // after a provider turn error; accepted with a keypress.
     pending_fallback_offer: Option<PendingFallbackOffer>,
@@ -1529,6 +1535,10 @@ pub struct App {
     /// session IDs from laptop-local todo storage.
     remote_todos_payload: Option<(String, String)>,
     remote_todos_requested_at: Option<Instant>,
+    /// The connected server sends a todo snapshot on every change, so no
+    /// periodic poll is needed. Learned from the snapshots themselves and
+    /// cleared on reconnect, since the next server may be an older build.
+    remote_todos_pushed: bool,
     /// Hash of the todo payload rendered into the inline chat todo card, used
     /// to keep the card live-updating while it stays in the transcript.
     todo_card_rendered_hash: u64,
@@ -1778,6 +1788,10 @@ pub struct App {
     // CPU animating screens nobody is looking at. Defaults to true because not
     // every terminal reports focus events.
     client_focused: bool,
+    // Whether a focus report or an input event has confirmed `client_focused`
+    // since this process started. Until then focus is only presumed; see
+    // `expire_presumed_focus`.
+    client_focus_confirmed: bool,
     // Optional client runtime memory logger for low-overhead attribution journaling.
     runtime_memory_log: Option<RuntimeMemoryLogController>,
     // Once-per-idle-period retained-heap trim state (see idle_heap_release.rs).

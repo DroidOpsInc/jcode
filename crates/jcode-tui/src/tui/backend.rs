@@ -279,6 +279,11 @@ pub struct RemoteConnection {
     #[cfg(test)]
     protocol_bytes_scanned: usize,
     has_loaded_history: bool,
+    /// The connected server accepts `Request::ClientFocus`. Learned from its
+    /// Pong, so an older server is never sent a request it would reject.
+    server_accepts_focus: bool,
+    /// Last (focused, hidden) state reported to this server, if any.
+    reported_focus: Option<(bool, bool)>,
     last_account_usage_poll: Option<Instant>,
     call_output_tokens_seen: u64,
 }
@@ -310,8 +315,23 @@ pub(crate) fn soft_interrupt_client_id(request_id: u64) -> String {
     format!("tui-{request_id}")
 }
 
-fn account_usage_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
-    last_poll.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(30))
+/// Usage poll period for a window the user is looking at.
+const ACCOUNT_USAGE_POLL: Duration = Duration::from_secs(30);
+/// Usage poll period for an unfocused window. The quota display there is not
+/// being read, and focusing the window polls on the next tick. With 34 parked
+/// clients the 30s poll alone sent the shared server a request every second.
+const ACCOUNT_USAGE_POLL_UNFOCUSED: Duration = Duration::from_secs(300);
+
+fn account_usage_poll_interval(focused: bool) -> Duration {
+    if focused {
+        ACCOUNT_USAGE_POLL
+    } else {
+        ACCOUNT_USAGE_POLL_UNFOCUSED
+    }
+}
+
+fn account_usage_poll_due(last_poll: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    last_poll.is_none_or(|last| now.saturating_duration_since(last) >= interval)
 }
 
 fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool {
@@ -453,6 +473,8 @@ impl RemoteConnection {
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
+            server_accepts_focus: false,
+            reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         };
@@ -911,6 +933,49 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Ask the server what it supports. Its Pong carries the capability list.
+    pub async fn request_capabilities(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::Ping { id }).await?;
+        Ok(id)
+    }
+
+    /// Record the capability list from a Pong. Stream keepalive Pongs carry
+    /// none and must not clear what the server already advertised.
+    pub fn note_server_capabilities(&mut self, capabilities: &[String]) {
+        if capabilities
+            .iter()
+            .any(|capability| capability == crate::protocol::CLIENT_FOCUS_CAPABILITY)
+        {
+            self.server_accepts_focus = true;
+        }
+    }
+
+    /// Tell the server whether this window has focus, and whether an
+    /// unfocused window is out of sight, once per change, so it can batch
+    /// streamed text for sessions nobody is looking at. A no-op until the
+    /// server has advertised support.
+    pub async fn sync_focus(&mut self, focused: bool, hidden: bool) {
+        let hidden = hidden && !focused;
+        if !self.server_accepts_focus || self.reported_focus == Some((focused, hidden)) {
+            return;
+        }
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        if self
+            .send_request(Request::ClientFocus {
+                id,
+                focused,
+                hidden,
+            })
+            .await
+            .is_ok()
+        {
+            self.reported_focus = Some((focused, hidden));
+        }
+    }
+
     /// Ask the server for the fully route-expanded model catalog.
     ///
     /// The bootstrap `History` payload deliberately ships model *names* only
@@ -932,8 +997,14 @@ impl RemoteConnection {
     /// Request account quotas from the daemon, never from the render thread.
     /// The daemon shares in-flight fetches and applies provider retry backoff.
     pub async fn poll_account_usage(&mut self) -> Result<()> {
+        self.poll_account_usage_for_focus(true).await
+    }
+
+    /// Periodic poll from the tick loop, paced by whether the window is focused.
+    pub async fn poll_account_usage_for_focus(&mut self, focused: bool) -> Result<()> {
         let now = Instant::now();
-        if !account_usage_poll_due(self.last_account_usage_poll, now) {
+        let interval = account_usage_poll_interval(focused);
+        if !account_usage_poll_due(self.last_account_usage_poll, now, interval) {
             return Ok(());
         }
         // Throttle failed sends too, so a slow connection cannot flood retries.
@@ -1620,6 +1691,8 @@ impl RemoteConnection {
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
+            server_accepts_focus: false,
+            reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         }

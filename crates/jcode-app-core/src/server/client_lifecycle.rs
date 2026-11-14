@@ -138,6 +138,18 @@ use request_watchdog::{
     RequestHandlerWatchdog, RequestHandlerWatchdogContext, log_request_lifecycle_handled,
     reject_if_agent_busy_for_request, send_agent_busy_error, should_start_idle_soft_interrupt,
 };
+/// Session and payload of a todo snapshot, for skipping identical resends.
+fn todos_event_key(event: &ServerEvent) -> Option<(String, String)> {
+    match event {
+        ServerEvent::Todos {
+            session_id,
+            payload,
+            ..
+        } => Some((session_id.clone(), payload.clone())),
+        _ => None,
+    }
+}
+
 fn server_reload_starting() -> bool {
     matches!(
         crate::server::recent_reload_state(RELOAD_STARTING_GUARD_MAX_AGE),
@@ -530,6 +542,7 @@ pub(super) async fn handle_client(
 
     // Per-client event channel (not shared with other clients)
     let _sdk_connection_guard = crate::tool::sdk::ConnectionGuard(client_connection_id.clone());
+    let _focus_guard = crate::stream_batching::ConnectionFocusGuard(client_connection_id.clone());
     let (client_event_tx, mut client_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
 
@@ -645,6 +658,8 @@ pub(super) async fn handle_client(
     // subscribe. Under heavy swarm file-activity load, ignored bus frames can
     // otherwise monopolize the select loop before the initial subscribe/read.
     let mut client_subscribed = false;
+    // Session and payload of the last todo snapshot sent on this connection.
+    let mut last_pushed_todos: Option<(String, String)> = None;
     let mut provisional_session = true;
     let mut pending_request = Some(initial_request);
 
@@ -739,6 +754,30 @@ pub(super) async fn handle_client(
                         }
                         last_available_models_snapshot = Some(Arc::clone(&catalog.dedup_key));
                     }
+                    // Push the todo card to windows showing this session, so
+                    // they do not each poll for it. One todo-tool call writes
+                    // todos, goals and plan in turn; identical snapshots are
+                    // not resent.
+                    Ok(BusEvent::TodoStateStored(session_id)) => {
+                        if session_id == client_session_id {
+                            let event = super::client_writer::todos_snapshot_event(&client_session_id);
+                            let key = todos_event_key(&event);
+                            if key != last_pushed_todos {
+                                last_pushed_todos = key;
+                                let _ = client_event_tx.send(event);
+                            }
+                        }
+                    }
+                    // Missed bus events may include a todo write. The client no
+                    // longer polls, so resend the snapshot rather than guess.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let event = super::client_writer::todos_snapshot_event(&client_session_id);
+                        let key = todos_event_key(&event);
+                        if key != last_pushed_todos {
+                            last_pushed_todos = key;
+                            let _ = client_event_tx.send(event);
+                        }
+                    }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
                             let _ = client_event_tx.send(ServerEvent::BatchProgress { progress });
@@ -810,6 +849,20 @@ pub(super) async fn handle_client(
                 }
             }
         };
+        // A focus report only updates this connection's flag. It takes no
+        // admission reservation and gets no Ack: it exists to remove wakeups.
+        if let Request::ClientFocus {
+            focused, hidden, ..
+        } = &request
+        {
+            crate::stream_batching::set_connection_focus(
+                &client_connection_id,
+                &client_session_id,
+                *focused,
+                *hidden,
+            );
+            continue;
+        }
         let request_decoded_at = Instant::now();
         // Direct input wins the biased select above. A client may already have
         // observed Done/Error while this actor still holds the finished turn's
@@ -1517,19 +1570,12 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::ClientFocus { .. } => unreachable!("focus reports are handled before acknowledgment"),
+
             Request::GetTodos { .. } => {
-                let payload = serde_json::json!({
-                    "todos": crate::todo::load_todos(&client_session_id).unwrap_or_else(|error| {
-                        crate::logging::warn(&format!("Failed to load todos for {client_session_id}: {error}"));
-                        Vec::new()
-                    }),
-                    "plan": crate::todo::load_plan(&client_session_id).unwrap_or_default(),
-                    "goals": crate::todo::load_goals(&client_session_id).unwrap_or_default(),
-                });
-                let _ = client_event_tx.send(ServerEvent::Todos {
-                    session_id: client_session_id.clone(),
-                    payload: payload.to_string(),
-                });
+                let event = super::client_writer::todos_snapshot_event(&client_session_id);
+                last_pushed_todos = todos_event_key(&event);
+                let _ = client_event_tx.send(event);
             }
 
             Request::GetState { id } => {
